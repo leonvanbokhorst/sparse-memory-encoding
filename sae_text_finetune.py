@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import json  # To load the generated data
 import os
-from sklearn.decomposition import PCA  
+from sklearn.decomposition import PCA
 
 # Ensure reproducibility if needed (optional)
 torch.manual_seed(42)
@@ -893,16 +893,74 @@ if "memory_trace" in locals() and memory_trace.shape[0] > 0:
         plt.title("PCA of Narrative SAE Activations (Colored by Category)")
         plt.xlabel("Principal Component 1")
         plt.ylabel("Principal Component 2")
-        plt.legend(handles=scatter_handles, title="Categories")
+        # plt.legend(handles=scatter_handles, title="Categories") # Modified legend below
         plt.grid(True, linestyle="--", alpha=0.5)
 
+        # --- Highlight Retrieved Points ---
+        highlight_markers = ["X", "P", "s"]  # Markers for the 3 queries
+        highlight_colors = ["red", "lime", "blue"]  # Edge colors
+        highlight_labels = [
+            "Personal Distress Focus (Top 5)",
+            "Refined External Crisis (Top 5)",
+            "Routine Focus (Top 5)",
+        ]
+        highlight_indices_list = []
+
+        # Check if index variables exist before trying to use them
+        if "top_indices_p16_n10" in locals():
+            highlight_indices_list.append(top_indices_p16_n10)
+        else:
+            highlight_indices_list.append(None)
+
+        if "top_indices_crisis_refined" in locals():
+            highlight_indices_list.append(top_indices_crisis_refined)
+        else:
+            highlight_indices_list.append(None)
+
+        if "top_indices_routine" in locals():
+            highlight_indices_list.append(top_indices_routine)
+        else:
+            highlight_indices_list.append(None)
+
+        for i, indices_tensor in enumerate(highlight_indices_list):
+            if indices_tensor is not None and indices_tensor.numel() > 0:
+                indices = indices_tensor.tolist()
+                # Ensure indices are within bounds of pca_result
+                valid_indices = [idx for idx in indices if idx < pca_result.shape[0]]
+                if valid_indices:
+                    h_scatter = plt.scatter(
+                        pca_result[valid_indices, 0],
+                        pca_result[valid_indices, 1],
+                        marker=highlight_markers[i],
+                        s=150,  # Larger size
+                        edgecolor=highlight_colors[i],
+                        facecolor="none",  # No fill
+                        linewidth=1.5,
+                        label=highlight_labels[i],
+                    )
+                    scatter_handles.append(h_scatter)  # Add to legend items
+                else:
+                    print(
+                        f"Warning: Indices for '{highlight_labels[i]}' out of bounds or empty after validation."
+                    )
+            elif indices_tensor is None:
+                print(
+                    f"Warning: Indices variable for '{highlight_labels[i]}' not found."
+                )
+            # No need to print if numel is 0, retrieval function already warns
+
+        # Update legend to include highlight markers
+        plt.legend(
+            handles=scatter_handles, title="Categories & Queries", fontsize="small"
+        )
+
         # 3. Save the Plot
-        pca_plot_path = "pca_narrative_activations.png"
+        pca_plot_path = "pca_narrative_activations_highlighted.png"  # New filename
         try:
             plt.savefig(pca_plot_path)
-            print(f"Saved PCA scatter plot to {pca_plot_path}")
+            print(f"Saved highlighted PCA scatter plot to {pca_plot_path}")
         except Exception as e:
-            print(f"Error saving PCA plot: {e}")
+            print(f"Error saving highlighted PCA plot: {e}")
         # plt.show() # Optional: Display plot
 
     else:
