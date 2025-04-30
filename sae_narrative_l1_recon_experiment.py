@@ -203,6 +203,12 @@ for epoch in range(EPOCHS):
 
 print("--- Training complete ---")
 
+# Save the trained model state dictionary
+model_save_path = "sae_model_beta0005.pth"
+torch.save(memory_net.state_dict(), model_save_path)
+print(f"Model state dictionary saved to {model_save_path}")
+
+
 # -------------------------------------
 # 8. Plotting Loss
 # -------------------------------------
