@@ -7,5 +7,6 @@ requires-python = ">=3.10"
 dependencies = [
     "matplotlib>=3.10.1",
     "numpy>=2.2.5",
+    "sentence-transformers>=4.1.0",
     "torch>=2.7.0",
 ]
