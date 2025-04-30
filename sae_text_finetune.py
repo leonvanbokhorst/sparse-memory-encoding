@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import json  # To load the generated data
 import os
+from sklearn.decomposition import PCA  
 
 # Ensure reproducibility if needed (optional)
 torch.manual_seed(42)
@@ -655,7 +656,84 @@ def retrieve_top_k_memories(trace, neuron_index, k=5):
     return top_k_indices, top_k_values
 
 
-# --- Perform Retrieval ---
+def retrieve_memories_composite(trace, positive_neurons, negative_neurons=[], k=5):
+    """Retrieves indices of memories maximizing positive neuron activations while minimizing negative ones."""
+    if not positive_neurons and not negative_neurons:
+        print("Error: Must provide at least one positive or negative neuron index.")
+        return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.float)
+
+    # Ensure indices are valid
+    all_indices = positive_neurons + negative_neurons
+    max_idx = trace.shape[1] - 1
+    if any(idx < 0 or idx > max_idx for idx in all_indices):
+        print(f"Error: Neuron indices must be between 0 and {max_idx}.")
+        return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.float)
+
+    # Calculate positive score (average activation of positive neurons)
+    if positive_neurons:
+        # Handle single index case without error
+        pos_indices_tensor = torch.tensor(positive_neurons, dtype=torch.long)
+        pos_score = trace[:, pos_indices_tensor].mean(dim=1)
+    else:
+        pos_score = torch.zeros(trace.shape[0], dtype=trace.dtype)
+
+    # Calculate negative penalty (average activation of negative neurons)
+    if negative_neurons:
+        # Handle single index case without error
+        neg_indices_tensor = torch.tensor(negative_neurons, dtype=torch.long)
+        neg_penalty = trace[:, neg_indices_tensor].mean(dim=1)
+    else:
+        neg_penalty = torch.zeros(trace.shape[0], dtype=trace.dtype)
+
+    composite_score = pos_score - neg_penalty
+    # Ensure k is not > trace length
+    actual_k = min(k, len(trace))
+    top_k_values, top_k_indices = torch.topk(composite_score, actual_k)
+    return top_k_indices, top_k_values
+
+
+def retrieve_external_crisis(trace, crisis_neuron, distress_neuron, threshold=0.5, k=5):
+    """Retrieves indices of memories with high crisis neuron activation (above threshold)
+    while penalizing distress neuron activation."""
+    if (
+        crisis_neuron < 0
+        or crisis_neuron >= trace.shape[1]
+        or distress_neuron < 0
+        or distress_neuron >= trace.shape[1]
+    ):
+        print(f"Error: Neuron indices out of bounds (0-{trace.shape[1]-1}).")
+        return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.float)
+
+    # 1. Filter by crisis neuron threshold
+    crisis_activation = trace[:, crisis_neuron]
+    # Use .nonzero() which returns indices where condition is true
+    valid_indices = (crisis_activation >= threshold).nonzero(as_tuple=True)[0]
+
+    if valid_indices.numel() == 0:
+        print(
+            f"No memories found with Neuron {crisis_neuron} activation >= {threshold}"
+        )
+        return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.float)
+
+    print(
+        f"Found {valid_indices.numel()} memories with Neuron {crisis_neuron} >= {threshold}"
+    )
+
+    # 2. Calculate composite score for filtered indices
+    filtered_trace = trace[valid_indices]
+    scores = filtered_trace[:, crisis_neuron] - filtered_trace[:, distress_neuron]
+
+    # 3. Find top k within the filtered set
+    actual_k = min(k, scores.size(0))
+    top_k_scores, top_k_relative_indices = torch.topk(scores, actual_k)
+
+    # 4. Map relative indices back to original indices
+    top_k_original_indices = valid_indices[top_k_relative_indices]
+
+    return top_k_original_indices, top_k_scores
+
+
+# --- Perform Retrieval (Single Neuron) ---
 NEURON_16_INDEX = 16  # Personal Distress Specialist
 NEURON_10_INDEX = 10  # Emotional Intensity & Crisis Indicator
 TOP_K = 5
@@ -689,14 +767,156 @@ for idx in top_indices_n10:
     item = synthetic_data[idx.item()]  # Use .item() to get Python int
     print(f"  - Index {idx.item()} (Category: {item['category']}): {item['text']}")
 
+# --- Perform Composite Retrieval ---
+print("\n--- Performing Composite Queries ---")
+
+# Query 1: Personal Distress without External Crisis (High N16, Low N10)
+print(
+    f"\nRetrieving top {TOP_K} memories for High N16 / Low N10 (Personal Distress Focus)..."
+)
+top_indices_p16_n10, top_scores_p16_n10 = retrieve_memories_composite(
+    memory_trace,
+    positive_neurons=[NEURON_16_INDEX],
+    negative_neurons=[NEURON_10_INDEX],
+    k=TOP_K,
+)
+print(f"Retrieved indices: {top_indices_p16_n10.tolist()}")
+print("Associated composite scores:", [f"{v:.4f}" for v in top_scores_p16_n10.tolist()])
+print("Corresponding Narratives:")
+for idx in top_indices_p16_n10:
+    item = synthetic_data[idx.item()]
+    # Show N16 and N10 activations for clarity
+    n16_act = memory_trace[idx.item(), NEURON_16_INDEX].item()
+    n10_act = memory_trace[idx.item(), NEURON_10_INDEX].item()
+    print(
+        f"  - Index {idx.item()} (Cat: {item['category']}, N16: {n16_act:.3f}, N10: {n10_act:.3f}): {item['text']}"
+    )
+
+# Query 2: External Crisis without Deep Personal Distress (High N10 > threshold, Low N16)
+print(
+    f"\nRetrieving top {TOP_K} memories for Refined External Crisis (N10 >= 0.5, penalized by N16)..."
+)
+CRISIS_THRESHOLD = 0.5  # Define the threshold
+top_indices_crisis_refined, top_scores_crisis_refined = retrieve_external_crisis(
+    memory_trace,
+    crisis_neuron=NEURON_10_INDEX,
+    distress_neuron=NEURON_16_INDEX,
+    threshold=CRISIS_THRESHOLD,
+    k=TOP_K,
+)
+
+if top_indices_crisis_refined.numel() > 0:
+    print(f"Retrieved indices: {top_indices_crisis_refined.tolist()}")
+    print(
+        "Associated composite scores (N10 - N16, for N10 >= threshold):",
+        [f"{v:.4f}" for v in top_scores_crisis_refined.tolist()],
+    )
+    print("Corresponding Narratives:")
+    for idx in top_indices_crisis_refined:
+        item = synthetic_data[idx.item()]
+        n16_act = memory_trace[idx.item(), NEURON_16_INDEX].item()
+        n10_act = memory_trace[idx.item(), NEURON_10_INDEX].item()
+        print(
+            f"  - Index {idx.item()} (Cat: {item['category']}, N16: {n16_act:.3f}, N10: {n10_act:.3f}): {item['text']}"
+        )
+else:
+    print("No memories met the refined external crisis criteria.")
+
+# Query 3: Routine-like (Low N10 and Low N16) - Maximize the NEGATIVE of their sum
+print(f"\nRetrieving top {TOP_K} memories for Low N10 & Low N16 (Routine Focus)...")
+# We want the MINIMUM sum of N10 and N16. TopK finds maximums.
+# So, we find the maximum of the NEGATIVE of their average activation.
+# Effectively, retrieve_memories_composite with only negative neurons maximizes the score = 0 - neg_penalty
+top_indices_routine, top_scores_routine = retrieve_memories_composite(
+    memory_trace,
+    positive_neurons=[],  # No positive contribution
+    negative_neurons=[NEURON_10_INDEX, NEURON_16_INDEX],
+    k=TOP_K,
+)
+# Note: The score here is -(Avg(N10, N16)), so higher score means lower activation
+print(f"Retrieved indices: {top_indices_routine.tolist()}")
+print(
+    "Associated composite scores (higher means lower N10/N16 activation):",
+    [f"{v:.4f}" for v in top_scores_routine.tolist()],
+)
+print("Corresponding Narratives:")
+for idx in top_indices_routine:
+    item = synthetic_data[idx.item()]
+    n16_act = memory_trace[idx.item(), NEURON_16_INDEX].item()
+    n10_act = memory_trace[idx.item(), NEURON_10_INDEX].item()
+    print(
+        f"  - Index {idx.item()} (Cat: {item['category']}, N16: {n16_act:.3f}, N10: {n10_act:.3f}): {item['text']}"
+    )
+
 # -------------------------------------\
 # 9. Further Analysis (Placeholder for original analysis plots if any)
 # -------------------------------------\
 print("\n--- Analysis/Retrieval Complete --- ")
 
+# --- Visualization Section ---
+print("\n--- Generating PCA Visualization --- ")
+
+# Check if memory_trace exists and has data
+if "memory_trace" in locals() and memory_trace.shape[0] > 0:
+    # 1. Perform PCA
+    print(f"Performing PCA on memory trace (shape: {memory_trace.shape})...")
+    pca = PCA(n_components=2)
+    # PCA expects numpy array, ensure memory_trace is CPU tensor then convert
+    memory_trace_np = (
+        memory_trace.numpy() if isinstance(memory_trace, torch.Tensor) else memory_trace
+    )
+    pca_result = pca.fit_transform(memory_trace_np)
+    print(f"PCA completed. Result shape: {pca_result.shape}")
+
+    # 2. Create Scatter Plot
+    plt.figure(figsize=(12, 8))
+    scatter_handles = []  # For custom legend
+    colors = plt.cm.viridis(np.linspace(0, 1, len(CATEGORIES)))
+
+    # Ensure category_indices and category_map are available from data prep section
+    if "category_indices" in locals() and "category_map" in locals():
+        category_list = [CATEGORIES[i] for i in category_indices.tolist()]
+        for i, category_name in enumerate(CATEGORIES):
+            # Find indices belonging to the current category
+            category_mask = category_indices == category_map[category_name]
+            # Plot points for this category
+            scatter = plt.scatter(
+                pca_result[category_mask, 0],
+                pca_result[category_mask, 1],
+                color=colors[i],
+                label=category_name,
+                alpha=0.6,  # Add some transparency
+                s=20,  # Adjust point size
+            )
+            scatter_handles.append(scatter)
+
+        plt.title("PCA of Narrative SAE Activations (Colored by Category)")
+        plt.xlabel("Principal Component 1")
+        plt.ylabel("Principal Component 2")
+        plt.legend(handles=scatter_handles, title="Categories")
+        plt.grid(True, linestyle="--", alpha=0.5)
+
+        # 3. Save the Plot
+        pca_plot_path = "pca_narrative_activations.png"
+        try:
+            plt.savefig(pca_plot_path)
+            print(f"Saved PCA scatter plot to {pca_plot_path}")
+        except Exception as e:
+            print(f"Error saving PCA plot: {e}")
+        # plt.show() # Optional: Display plot
+
+    else:
+        print(
+            "Error: category_indices or category_map not found. Cannot create category plot."
+        )
+
+else:
+    print("Skipping PCA visualization: memory_trace not found or empty.")
+
+
 # (Original analysis code like plotting category centroids, sparsity, etc., would go here if needed)
 # Example: Plotting loss history (if training occurred)
-if not skip_training and epoch_loss_history:
+if not skip_training and "epoch_loss_history" in locals() and epoch_loss_history:
     plt.figure(figsize=(10, 5))
     plt.plot(epoch_loss_history, label="Total Fine-tuning Loss")
     plt.xlabel("Epoch")
