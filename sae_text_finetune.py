@@ -4,6 +4,8 @@ import torch.optim as optim
 from sentence_transformers import SentenceTransformer
 import numpy as np
 import matplotlib.pyplot as plt
+import json  # To load the generated data
+import os
 
 # Ensure reproducibility if needed (optional)
 # torch.manual_seed(42)
@@ -43,16 +45,21 @@ COMPRESSED_SIZE = 30
 
 # --- Paths ---
 PRETRAINED_MODEL_PATH = "sae_model_beta0005.pth"  # From sine-wave training
+SYNTHETIC_DATA_PATH = "synthetic_narrative_data.json"  # Path to generated data
 FINETUNED_MODEL_SAVE_PATH = "sae_text_finetuned.pth"
 
 # --- Fine-tuning Hyperparameters ---
 FINETUNE_EPOCHS = 200  # Adjust as needed
 LEARNING_RATE = 1e-4  # Lower LR for fine-tuning
 BETA_L1 = 0.0005  # Sparsity strength (can tune)
+BATCH_SIZE = 32  # Add batch size for training on larger data
+
+# --- Simplified Category Names ---
+CATEGORIES = ["emotional", "complex", "routine"]  # Use simplified names
 
 # --- Analysis Configuration ---
-# Define key neurons based on sine-wave analysis for post-tuning check
-# (Ensure these are the correct ones from the BETA_L1=0.0005 run)
+# Keep sine-wave neuron IDs for potential initial comparison,
+# but remember new roles will emerge for text.
 CORE_NEURONS_SINE = [15, 21]
 UNIQUE_EMO_NEURONS_SINE = [5]
 UNIQUE_ROUTINE_NEURONS_SINE = [9, 28]
@@ -68,7 +75,7 @@ NEURONS_TO_ANALYZE = sorted(
     )
 )
 EPSILON = 1e-10
-ANALYSIS_THRESHOLD = 0.01  # Threshold for neuron activation analysis
+ANALYSIS_THRESHOLD = 0.01
 
 # --- Device Setup ---
 if torch.backends.mps.is_available():
@@ -84,34 +91,23 @@ else:
 # -------------------------------------
 # 3. Data Preparation
 # -------------------------------------
-print("Preparing textual data...")
-# Expand this dataset significantly for robust fine-tuning
-text_samples_dict = {
-    "Strong Emotional": [
-        "She broke down, finally confronting the grief she'd held back for years.",
-        "A wave of pure joy washed over him as he saw them approach.",
-        "The betrayal hit him like a physical blow, stealing his breath.",
-        "He felt an overwhelming sense of peace watching the sunset.",
-        "Panic surged as the deadline loomed impossibly close.",
-        # Add more emotional examples (aim for 20+)
-    ],
-    "Complex/Chaotic": [
-        "Their argument spiraled rapidly, misunderstandings compounding each other.",
-        "The meeting dissolved into confusion, multiple people talking over each other.",
-        "Navigating the crowded market felt like swimming against a chaotic tide.",
-        "The conflicting instructions left the team completely paralyzed.",
-        "Untangling the web of lies required careful, painstaking effort.",
-        # Add more chaotic examples (aim for 20+)
-    ],
-    "Routine": [
-        "He woke up, poured coffee, and checked his messages before starting work.",
-        "The usual Tuesday morning meeting covered sales figures and upcoming deadlines.",
-        "She walked the familiar path home, the evening quiet and uneventful.",
-        "Making breakfast was a simple, everyday ritual.",
-        "The commute was predictable, same traffic, same route.",
-        # Add more routine examples (aim for 20+)
-    ],
-}
+print(f"Loading synthetic textual data from {SYNTHETIC_DATA_PATH}...")
+try:
+    with open(SYNTHETIC_DATA_PATH, "r", encoding="utf-8") as f:
+        synthetic_data = json.load(f)
+    print(f"Loaded {len(synthetic_data)} data points.")
+except FileNotFoundError:
+    print(
+        f"Error: Synthetic data file not found at {SYNTHETIC_DATA_PATH}. Please run generation script."
+    )
+    exit()
+except Exception as e:
+    print(f"Error loading data: {e}")
+    exit()
+
+# --- Prepare Data for Model ---
+all_texts = [item["text"] for item in synthetic_data]
+category_names = [item["category"] for item in synthetic_data]
 
 # --- Encode Texts ---
 print(f"Loading sentence transformer: {EMBEDDING_MODEL_NAME}")
@@ -121,52 +117,44 @@ except TypeError:
     print("Warning: Could not set device for SentenceTransformer directly.")
     embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-all_texts = []
-labels = []  # Store category names for potential analysis
-category_indices = []  # Store numerical index for weighting later
-category_map = {name: i for i, name in enumerate(text_samples_dict.keys())}
-
-for category, texts in text_samples_dict.items():
-    all_texts.extend(texts)
-    labels.extend([category] * len(texts))
-    category_indices.extend([category_map[category]] * len(texts))
-
 print(f"Encoding {len(all_texts)} text samples...")
-embeddings_np = embedder.encode(all_texts)
-embeddings_tensor = torch.tensor(embeddings_np).float().to(device)
-category_indices_tensor = torch.tensor(category_indices).long().to(device)
-print(
-    f"Embeddings tensor shape: {embeddings_tensor.shape}, Device: {embeddings_tensor.device}"
-)
+embeddings_np = embedder.encode(all_texts, show_progress_bar=True)
+embeddings_tensor = torch.tensor(
+    embeddings_np
+).float()  # Keep on CPU initially for Dataset
+print(f"Embeddings tensor shape: {embeddings_tensor.shape}")
 
-# --- Define Importance Weights based on Categories ---
-# Example: Emotional=3.0, Chaotic=2.0, Routine=1.0 for reconstruction
+# --- Map Categories to Indices and Create Weights ---
+category_map = {name: i for i, name in enumerate(CATEGORIES)}  # Use simplified names
+category_indices = torch.tensor([category_map[name] for name in category_names]).long()
+
+# Use simplified category names for weights
 recon_weights_map = {
-    category_map["Strong Emotional"]: 3.0,
-    category_map["Complex/Chaotic"]: 2.0,
-    category_map["Routine"]: 1.0,
+    category_map["emotional"]: 3.0,
+    category_map["complex"]: 2.0,
+    category_map["routine"]: 1.0,
 }
-recon_weights = (
-    torch.tensor([recon_weights_map[i.item()] for i in category_indices_tensor])
-    .float()
-    .to(device)
-)
+recon_weights = torch.tensor(
+    [recon_weights_map[i.item()] for i in category_indices]
+).float()
 
-# Example: Emotional=0.3, Chaotic=0.5, Routine=1.0 for L1 sparsity
 sparsity_weights_map = {
-    category_map["Strong Emotional"]: 0.3,
-    category_map["Complex/Chaotic"]: 0.5,
-    category_map["Routine"]: 1.0,
+    category_map["emotional"]: 0.3,
+    category_map["complex"]: 0.5,
+    category_map["routine"]: 1.0,
 }
 sparsity_weights = (
-    torch.tensor([sparsity_weights_map[i.item()] for i in category_indices_tensor])
+    torch.tensor([sparsity_weights_map[i.item()] for i in category_indices])
     .float()
     .unsqueeze(1)
-    .to(device)
 )  # Shape [N, 1]
 
-# (Optional: Split into Train/Validation Sets Here if desired)
-# For simplicity, we'll fine-tune on the whole small dataset for now
+# --- Create DataLoader ---
+from torch.utils.data import TensorDataset, DataLoader
+
+dataset = TensorDataset(embeddings_tensor, recon_weights, sparsity_weights)
+data_loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+print(f"Created DataLoader with batch size {BATCH_SIZE}")
 
 # -------------------------------------
 # 4. Model Loading & Setup
@@ -193,46 +181,63 @@ optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 criterion_recon = nn.MSELoss(reduction="none")  # For weighted loss
 
 # -------------------------------------
-# 5. Fine-tuning Loop
+# 5. Fine-tuning Loop (with DataLoader)
 # -------------------------------------
 print(f"\n--- Starting Fine-tuning for {FINETUNE_EPOCHS} Epochs --- ")
-loss_history = []
+epoch_loss_history = []
 
 model.train()  # Set model to training mode
 for epoch in range(FINETUNE_EPOCHS):
-    optimizer.zero_grad()
+    epoch_total_loss = 0.0
+    epoch_recon_loss = 0.0
+    epoch_sparsity_loss = 0.0
+    num_batches = 0
 
-    # Model now returns decoded, encoded, projected
-    reconstructed, encoded, projected = model(embeddings_tensor)
+    for batch_embeddings, batch_recon_weights, batch_sparsity_weights in data_loader:
+        # Move batch data to the correct device
+        batch_embeddings = batch_embeddings.to(device)
+        batch_recon_weights = batch_recon_weights.to(device)
+        batch_sparsity_weights = batch_sparsity_weights.to(device)
 
-    # --- Weighted Reconstruction Loss ---
-    # Compare reconstructed (decoder output) with projected (encoder input)
-    element_wise_recon_loss = criterion_recon(
-        reconstructed, projected
-    )  # Target is projected
-    recon_loss_per_episode = torch.mean(element_wise_recon_loss, dim=1)
-    weighted_recon_loss = (recon_loss_per_episode * recon_weights).mean()
+        optimizer.zero_grad()
 
-    # --- Weighted L1 Sparsity Loss ---
-    l1_norm_per_episode = torch.norm(encoded, p=1, dim=1, keepdim=True)
-    weighted_l1_per_episode = (
-        l1_norm_per_episode * sparsity_weights
-    )  # sparsity_weights is already [N, 1]
-    sparsity_loss = BETA_L1 * torch.mean(weighted_l1_per_episode)
+        reconstructed, encoded, projected = model(batch_embeddings)
 
-    # --- Total Loss ---
-    total_loss = weighted_recon_loss + sparsity_loss
+        # --- Weighted Reconstruction Loss ---
+        element_wise_recon_loss = criterion_recon(reconstructed, projected)
+        recon_loss_per_episode = torch.mean(element_wise_recon_loss, dim=1)
+        # Apply weights for this batch
+        weighted_recon_loss = (recon_loss_per_episode * batch_recon_weights).mean()
 
-    total_loss.backward()
-    torch.nn.utils.clip_grad_norm_(
-        model.parameters(), max_norm=1.0
-    )  # Optional gradient clipping
-    optimizer.step()
+        # --- Weighted L1 Sparsity Loss ---
+        l1_norm_per_episode = torch.norm(encoded, p=1, dim=1, keepdim=True)
+        weighted_l1_per_episode = (
+            l1_norm_per_episode * batch_sparsity_weights
+        )  # sparsity_weights is [N_batch, 1]
+        sparsity_loss = BETA_L1 * torch.mean(weighted_l1_per_episode)
 
-    loss_history.append(total_loss.item())
-    if epoch % 20 == 0 or epoch == FINETUNE_EPOCHS - 1:
+        # --- Total Loss ---
+        total_loss = weighted_recon_loss + sparsity_loss
+
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        epoch_total_loss += total_loss.item()
+        epoch_recon_loss += weighted_recon_loss.item()
+        epoch_sparsity_loss += sparsity_loss.item()
+        num_batches += 1
+
+    # Calculate average loss for the epoch
+    avg_epoch_total_loss = epoch_total_loss / num_batches
+    avg_epoch_recon_loss = epoch_recon_loss / num_batches
+    avg_epoch_sparsity_loss = epoch_sparsity_loss / num_batches
+    epoch_loss_history.append(avg_epoch_total_loss)
+
+    if epoch % 10 == 0 or epoch == FINETUNE_EPOCHS - 1:  # Print more frequently maybe
         print(
-            f"Epoch {epoch:4d}/{FINETUNE_EPOCHS}, Total Loss: {total_loss.item():.6f}, Recon Loss (Weighted): {weighted_recon_loss.item():.6f}, Sparsity Loss: {sparsity_loss.item():.6f}"
+            f"Epoch {epoch:4d}/{FINETUNE_EPOCHS}, Avg Total Loss: {avg_epoch_total_loss:.6f}, "
+            f"Avg Recon Loss (W): {avg_epoch_recon_loss:.6f}, Avg Sparsity Loss: {avg_epoch_sparsity_loss:.6f}"
         )
 
 print("--- Fine-tuning complete ---")
@@ -251,67 +256,84 @@ print("\n--- Analyzing Neuron Activations of Fine-tuned Model --- ")
 model.eval()  # Set model to evaluation mode
 results_finetuned = {}
 
+# Process samples category by category for easier analysis aggregation
 with torch.no_grad():
-    for category, texts in text_samples_dict.items():
-        embeddings_np = embedder.encode(texts)
+    for category in CATEGORIES:
+        # Select texts and encode only for the current category
+        category_texts = [
+            item["text"] for item in synthetic_data if item["category"] == category
+        ]
+        if not category_texts:
+            print(f"No texts found for category '{category}' in loaded data.")
+            continue
+
+        embeddings_np = embedder.encode(category_texts)
         embeddings = torch.tensor(embeddings_np).float().to(device)
-        # We only need the encoded part for analysis here
-        _, memory_traces, _ = model(
-            embeddings
-        )  # Get memory traces from fine-tuned model
+
+        # Get traces - we only need the middle output (encoded)
+        _, memory_traces, _ = model(embeddings)
         results_finetuned[category] = {
-            "texts": texts,
+            "texts": category_texts,
             "memory_traces": memory_traces.cpu().numpy(),
         }
 
-# --- Analysis Code (Similar to section 6 of sae_text_experiment.py) ---
-print(f"Analyzing neurons originally identified: {NEURONS_TO_ANALYZE}")
+# --- Analysis Code ---
+print(f"Analyzing neurons originally identified (from sine): {NEURONS_TO_ANALYZE}")
 print(
-    "(Core = {CORE_NEURONS_SINE}, Unique Emo = {UNIQUE_EMO_NEURONS_SINE}, Unique Routine = {UNIQUE_ROUTINE_NEURONS_SINE})"
+    "(Sine Core={CORE_NEURONS_SINE}, Sine Unique Emo={UNIQUE_EMO_NEURONS_SINE}, Sine Unique Routine={UNIQUE_ROUTINE_NEURONS_SINE})"
 )
 
 activation_summary = {}
 for category, data in results_finetuned.items():
-    print(f"\n{category} Texts (Post Fine-tuning):")
+    print(f"\n{category} Texts (Post Fine-tuning, {len(data['texts'])} samples):")
     traces = data["memory_traces"]
-    avg_activations = np.mean(traces[:, NEURONS_TO_ANALYZE], axis=0)
-    activation_summary[category] = avg_activations
-
-    print(
-        f"  Avg Activations ({NEURONS_TO_ANALYZE}): {[f'{act:.4f}' for act in avg_activations]}"
-    )
-
-    # Print specific groups
-    core_indices = [
-        NEURONS_TO_ANALYZE.index(n)
-        for n in CORE_NEURONS_SINE
-        if n in NEURONS_TO_ANALYZE
-    ]
-    if core_indices:
+    # Ensure we handle cases where NEURONS_TO_ANALYZE might be empty or invalid
+    if NEURONS_TO_ANALYZE and traces.shape[1] > max(NEURONS_TO_ANALYZE):
+        avg_activations = np.mean(traces[:, NEURONS_TO_ANALYZE], axis=0)
+        activation_summary[category] = avg_activations
         print(
-            f"    Avg Core ({CORE_NEURONS_SINE}) Activations: {[f'{avg_activations[i]:.4f}' for i in core_indices]}"
+            f"  Avg Activations ({NEURONS_TO_ANALYZE}): {[f'{act:.4f}' for act in avg_activations]}"
         )
 
-    unique_emo_indices = [
-        NEURONS_TO_ANALYZE.index(n)
-        for n in UNIQUE_EMO_NEURONS_SINE
-        if n in NEURONS_TO_ANALYZE
-    ]
-    if unique_emo_indices:
+        # Print specific groups based on SINE analysis
+        core_indices = [
+            NEURONS_TO_ANALYZE.index(n)
+            for n in CORE_NEURONS_SINE
+            if n in NEURONS_TO_ANALYZE
+        ]
+        if core_indices:
+            print(
+                f"    Avg Sine Core ({CORE_NEURONS_SINE}) Activations: {[f'{avg_activations[i]:.4f}' for i in core_indices]}"
+            )
+
+        unique_emo_indices = [
+            NEURONS_TO_ANALYZE.index(n)
+            for n in UNIQUE_EMO_NEURONS_SINE
+            if n in NEURONS_TO_ANALYZE
+        ]
+        if unique_emo_indices:
+            print(
+                f"    Avg Sine Unique Emo ({UNIQUE_EMO_NEURONS_SINE}) Activations: {[f'{avg_activations[i]:.4f}' for i in unique_emo_indices]}"
+            )
+
+        unique_routine_indices = [
+            NEURONS_TO_ANALYZE.index(n)
+            for n in UNIQUE_ROUTINE_NEURONS_SINE
+            if n in NEURONS_TO_ANALYZE
+        ]
+        if unique_routine_indices:
+            print(
+                f"    Avg Sine Unique Routine ({UNIQUE_ROUTINE_NEURONS_SINE}) Activations: {[f'{avg_activations[i]:.4f}' for i in unique_routine_indices]}"
+            )
+    else:
         print(
-            f"    Avg Unique Emo ({UNIQUE_EMO_NEURONS_SINE}) Activations: {[f'{avg_activations[i]:.4f}' for i in unique_emo_indices]}"
+            "  Could not perform analysis on specified sine-wave neurons (check indices and trace shape)."
         )
 
-    unique_routine_indices = [
-        NEURONS_TO_ANALYZE.index(n)
-        for n in UNIQUE_ROUTINE_NEURONS_SINE
-        if n in NEURONS_TO_ANALYZE
-    ]
-    if unique_routine_indices:
-        print(
-            f"    Avg Unique Routine ({UNIQUE_ROUTINE_NEURONS_SINE}) Activations: {[f'{avg_activations[i]:.4f}' for i in unique_routine_indices]}"
-        )
+print(
+    "\nNote: Roles of neurons likely shifted during fine-tuning. Full analysis needed."
+)
+print("Analysis Complete. Check if neuron roles align with text categories.")
 
-print("\nAnalysis Complete. Check if neuron roles align with text categories.")
-
-# (Optional: Add visualization of activation profiles for text data)
+# (TODO: Add de novo analysis - e.g., find top k active neurons per category)
+# (TODO: Add visualization of activation profiles for text data)
