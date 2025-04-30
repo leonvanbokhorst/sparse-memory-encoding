@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import json  # To load the generated data
 import os
+from sklearn.decomposition import PCA
 
 # Ensure reproducibility if needed (optional)
 torch.manual_seed(42)
@@ -163,91 +164,110 @@ print("Initializing SAE model for fine-tuning...")
 model = SparseMemoryText(
     embedding_dim=EMBEDDING_DIM, event_size=EVENT_SIZE, compressed_size=COMPRESSED_SIZE
 )
+model.to(device)  # Move model to device early
 
-print(f"Loading pre-trained state dictionary from: {PRETRAINED_MODEL_PATH}")
-try:
-    state_dict = torch.load(PRETRAINED_MODEL_PATH, map_location="cpu")
-    model.load_state_dict(
-        state_dict, strict=False
-    )  # Load encoder/decoder, ignore projection
-    print("Loaded pre-trained encoder/decoder weights.")
-except Exception as e:
+# --- Check if FINE-TUNED model exists ---
+if os.path.exists(FINETUNED_MODEL_SAVE_PATH):
     print(
-        f"Warning: Could not load pre-trained weights from {PRETRAINED_MODEL_PATH}. Training from scratch. Error: {e}"
+        f"Found existing fine-tuned model at {FINETUNED_MODEL_SAVE_PATH}. Loading weights..."
     )
-
-model.to(device)  # Move entire model to target device
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-criterion_recon = nn.MSELoss(reduction="none")  # For weighted loss
-
-# -------------------------------------
-# 5. Fine-tuning Loop (with DataLoader)
-# -------------------------------------
-print(f"\n--- Starting Fine-tuning for {FINETUNE_EPOCHS} Epochs --- ")
-epoch_loss_history = []
-
-model.train()  # Set model to training mode
-for epoch in range(FINETUNE_EPOCHS):
-    epoch_total_loss = 0.0
-    epoch_recon_loss = 0.0
-    epoch_sparsity_loss = 0.0
-    num_batches = 0
-
-    for batch_embeddings, batch_recon_weights, batch_sparsity_weights in data_loader:
-        # Move batch data to the correct device
-        batch_embeddings = batch_embeddings.to(device)
-        batch_recon_weights = batch_recon_weights.to(device)
-        batch_sparsity_weights = batch_sparsity_weights.to(device)
-
-        optimizer.zero_grad()
-
-        reconstructed, encoded, projected = model(batch_embeddings)
-
-        # --- Weighted Reconstruction Loss ---
-        element_wise_recon_loss = criterion_recon(reconstructed, projected)
-        recon_loss_per_episode = torch.mean(element_wise_recon_loss, dim=1)
-        # Apply weights for this batch
-        weighted_recon_loss = (recon_loss_per_episode * batch_recon_weights).mean()
-
-        # --- Weighted L1 Sparsity Loss ---
-        l1_norm_per_episode = torch.norm(encoded, p=1, dim=1, keepdim=True)
-        weighted_l1_per_episode = (
-            l1_norm_per_episode * batch_sparsity_weights
-        )  # sparsity_weights is [N_batch, 1]
-        sparsity_loss = BETA_L1 * torch.mean(weighted_l1_per_episode)
-
-        # --- Total Loss ---
-        total_loss = weighted_recon_loss + sparsity_loss
-
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        epoch_total_loss += total_loss.item()
-        epoch_recon_loss += weighted_recon_loss.item()
-        epoch_sparsity_loss += sparsity_loss.item()
-        num_batches += 1
-
-    # Calculate average loss for the epoch
-    avg_epoch_total_loss = epoch_total_loss / num_batches
-    avg_epoch_recon_loss = epoch_recon_loss / num_batches
-    avg_epoch_sparsity_loss = epoch_sparsity_loss / num_batches
-    epoch_loss_history.append(avg_epoch_total_loss)
-
-    if epoch % 10 == 0 or epoch == FINETUNE_EPOCHS - 1:  # Print more frequently maybe
+    model.load_state_dict(torch.load(FINETUNED_MODEL_SAVE_PATH, map_location=device))
+    print("Fine-tuned weights loaded. Skipping training.")
+    skip_training = True
+else:
+    print(
+        f"No fine-tuned model found at {FINETUNED_MODEL_SAVE_PATH}. Loading pre-trained weights for fine-tuning..."
+    )
+    skip_training = False
+    try:
+        print(f"Loading pre-trained state dictionary from: {PRETRAINED_MODEL_PATH}")
+        state_dict = torch.load(PRETRAINED_MODEL_PATH, map_location="cpu")
+        model.load_state_dict(
+            state_dict, strict=False
+        )  # Load encoder/decoder, ignore projection
+        print("Loaded pre-trained encoder/decoder weights.")
+    except Exception as e:
         print(
-            f"Epoch {epoch:4d}/{FINETUNE_EPOCHS}, Avg Total Loss: {avg_epoch_total_loss:.6f}, "
-            f"Avg Recon Loss (W): {avg_epoch_recon_loss:.6f}, Avg Sparsity Loss: {avg_epoch_sparsity_loss:.6f}"
+            f"Warning: Could not load pre-trained weights from {PRETRAINED_MODEL_PATH}. Training from scratch. Error: {e}"
         )
 
-print("--- Fine-tuning complete ---")
+    # Optimizer and Criterion only needed if training
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    criterion_recon = nn.MSELoss(reduction="none")  # For weighted loss
 
 # -------------------------------------
-# 6. Save Fine-tuned Model
+# 5. Fine-tuning Loop (Conditional)
 # -------------------------------------
-print(f"Saving fine-tuned model to {FINETUNED_MODEL_SAVE_PATH}...")
-torch.save(model.state_dict(), FINETUNED_MODEL_SAVE_PATH)
-print("Fine-tuned model saved.")
+if not skip_training:
+    print(f"\n--- Starting Fine-tuning for {FINETUNE_EPOCHS} Epochs --- ")
+    epoch_loss_history = []
+
+    model.train()  # Set model to training mode
+    for epoch in range(FINETUNE_EPOCHS):
+        epoch_total_loss = 0.0
+        epoch_recon_loss = 0.0
+        epoch_sparsity_loss = 0.0
+        num_batches = 0
+
+        for (
+            batch_embeddings,
+            batch_recon_weights,
+            batch_sparsity_weights,
+        ) in data_loader:
+            # Move batch data to the correct device
+            batch_embeddings = batch_embeddings.to(device)
+            batch_recon_weights = batch_recon_weights.to(device)
+            batch_sparsity_weights = batch_sparsity_weights.to(device)
+
+            optimizer.zero_grad()
+
+            reconstructed, encoded, projected = model(batch_embeddings)
+
+            # --- Weighted Reconstruction Loss ---
+            element_wise_recon_loss = criterion_recon(reconstructed, projected)
+            recon_loss_per_episode = torch.mean(element_wise_recon_loss, dim=1)
+            # Apply weights for this batch
+            weighted_recon_loss = (recon_loss_per_episode * batch_recon_weights).mean()
+
+            # --- Weighted L1 Sparsity Loss ---
+            l1_norm_per_episode = torch.norm(encoded, p=1, dim=1, keepdim=True)
+            weighted_l1_per_episode = (
+                l1_norm_per_episode * batch_sparsity_weights
+            )  # sparsity_weights is [N_batch, 1]
+            sparsity_loss = BETA_L1 * torch.mean(weighted_l1_per_episode)
+
+            # --- Total Loss ---
+            total_loss = weighted_recon_loss + sparsity_loss
+
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            epoch_total_loss += total_loss.item()
+            epoch_recon_loss += weighted_recon_loss.item()
+            epoch_sparsity_loss += sparsity_loss.item()
+            num_batches += 1
+
+        # Calculate average loss for the epoch
+        avg_epoch_total_loss = epoch_total_loss / num_batches
+        avg_epoch_recon_loss = epoch_recon_loss / num_batches
+        avg_epoch_sparsity_loss = epoch_sparsity_loss / num_batches
+        epoch_loss_history.append(avg_epoch_total_loss)
+
+        if epoch % 10 == 0 or epoch == FINETUNE_EPOCHS - 1:
+            print(
+                f"Epoch {epoch:4d}/{FINETUNE_EPOCHS}, Avg Total Loss: {avg_epoch_total_loss:.6f}, "
+                f"Avg Recon Loss (W): {avg_epoch_recon_loss:.6f}, Avg Sparsity Loss: {avg_epoch_sparsity_loss:.6f}"
+            )
+
+    print("--- Fine-tuning complete ---")
+
+    # -------------------------------------
+    # 6. Save Fine-tuned Model
+    # -------------------------------------
+    print(f"Saving fine-tuned model to {FINETUNED_MODEL_SAVE_PATH}...")
+    torch.save(model.state_dict(), FINETUNED_MODEL_SAVE_PATH)
+    print("Fine-tuned model saved.")
 
 # -------------------------------------
 # 7. Post-tuning Analysis (Neuron Roles)
@@ -599,3 +619,375 @@ print("\n--- Full Analysis Complete ---")
 
 # (Old TODOs remain relevant - could add cosine sim etc. later)
 # (TODO: Add visualization of activation profiles for text data)
+
+# -------------------------------------\
+# 8. Analysis & Retrieval (NEW SECTION)
+# -------------------------------------\
+print("\n--- Starting Analysis & Retrieval --- ")
+
+model.eval()  # Set model to evaluation mode
+
+# --- Calculate Full Memory Trace ---
+print("Calculating full memory trace (neuron activations) for the dataset...")
+with torch.no_grad():
+    # Move all embeddings to the device at once for faster processing if memory allows
+    all_embeddings_device = embeddings_tensor.to(device)
+    _, all_encoded_activations, _ = model(all_embeddings_device)
+    memory_trace = (
+        all_encoded_activations.cpu()
+    )  # Move back to CPU for analysis/indexing
+print(
+    f"Memory trace calculated. Shape: {memory_trace.shape}"
+)  # Should be [num_samples, COMPRESSED_SIZE]
+
+
+# --- Define Retrieval Functions ---
+def retrieve_top_k_memories(trace, neuron_index, k=5):
+    """Retrieves the indices of memories with the highest activation for a specific neuron."""
+    if neuron_index < 0 or neuron_index >= trace.shape[1]:
+        print(
+            f"Error: Neuron index {neuron_index} out of bounds (0-{trace.shape[1]-1})."
+        )
+        return torch.tensor([], dtype=torch.long)
+    neuron_activations = trace[:, neuron_index]
+    top_k_values, top_k_indices = torch.topk(
+        neuron_activations, k=min(k, len(trace))
+    )  # Ensure k is not > trace length
+    return top_k_indices, top_k_values
+
+
+def retrieve_memories_composite(trace, positive_neurons, negative_neurons=[], k=5):
+    """Retrieves indices of memories maximizing positive neuron activations while minimizing negative ones."""
+    if not positive_neurons and not negative_neurons:
+        print("Error: Must provide at least one positive or negative neuron index.")
+        return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.float)
+
+    # Ensure indices are valid
+    all_indices = positive_neurons + negative_neurons
+    max_idx = trace.shape[1] - 1
+    if any(idx < 0 or idx > max_idx for idx in all_indices):
+        print(f"Error: Neuron indices must be between 0 and {max_idx}.")
+        return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.float)
+
+    # Calculate positive score (average activation of positive neurons)
+    if positive_neurons:
+        # Handle single index case without error
+        pos_indices_tensor = torch.tensor(positive_neurons, dtype=torch.long)
+        pos_score = trace[:, pos_indices_tensor].mean(dim=1)
+    else:
+        pos_score = torch.zeros(trace.shape[0], dtype=trace.dtype)
+
+    # Calculate negative penalty (average activation of negative neurons)
+    if negative_neurons:
+        # Handle single index case without error
+        neg_indices_tensor = torch.tensor(negative_neurons, dtype=torch.long)
+        neg_penalty = trace[:, neg_indices_tensor].mean(dim=1)
+    else:
+        neg_penalty = torch.zeros(trace.shape[0], dtype=trace.dtype)
+
+    composite_score = pos_score - neg_penalty
+    # Ensure k is not > trace length
+    actual_k = min(k, len(trace))
+    top_k_values, top_k_indices = torch.topk(composite_score, actual_k)
+    return top_k_indices, top_k_values
+
+
+def retrieve_external_crisis(trace, crisis_neuron, distress_neuron, threshold=0.5, k=5):
+    """Retrieves indices of memories with high crisis neuron activation (above threshold)
+    while penalizing distress neuron activation."""
+    if (
+        crisis_neuron < 0
+        or crisis_neuron >= trace.shape[1]
+        or distress_neuron < 0
+        or distress_neuron >= trace.shape[1]
+    ):
+        print(f"Error: Neuron indices out of bounds (0-{trace.shape[1]-1}).")
+        return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.float)
+
+    # 1. Filter by crisis neuron threshold
+    crisis_activation = trace[:, crisis_neuron]
+    # Use .nonzero() which returns indices where condition is true
+    valid_indices = (crisis_activation >= threshold).nonzero(as_tuple=True)[0]
+
+    if valid_indices.numel() == 0:
+        print(
+            f"No memories found with Neuron {crisis_neuron} activation >= {threshold}"
+        )
+        return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.float)
+
+    print(
+        f"Found {valid_indices.numel()} memories with Neuron {crisis_neuron} >= {threshold}"
+    )
+
+    # 2. Calculate composite score for filtered indices
+    filtered_trace = trace[valid_indices]
+    scores = filtered_trace[:, crisis_neuron] - filtered_trace[:, distress_neuron]
+
+    # 3. Find top k within the filtered set
+    actual_k = min(k, scores.size(0))
+    top_k_scores, top_k_relative_indices = torch.topk(scores, actual_k)
+
+    # 4. Map relative indices back to original indices
+    top_k_original_indices = valid_indices[top_k_relative_indices]
+
+    return top_k_original_indices, top_k_scores
+
+
+# --- Perform Retrieval (Single Neuron) ---
+NEURON_16_INDEX = 16  # Personal Distress Specialist
+NEURON_10_INDEX = 10  # Emotional Intensity & Crisis Indicator
+TOP_K = 5
+
+print(
+    f"\nRetrieving top {TOP_K} memories for Neuron {NEURON_16_INDEX} (Personal Distress)...\n"
+)
+top_indices_n16, top_values_n16 = retrieve_top_k_memories(
+    memory_trace, NEURON_16_INDEX, k=TOP_K
+)
+
+print(f"Retrieved indices: {top_indices_n16.tolist()}")
+print("Associated activations:", [f"{v:.4f}" for v in top_values_n16.tolist()])
+print("Corresponding Narratives:")
+for idx in top_indices_n16:
+    item = synthetic_data[idx.item()]  # Use .item() to get Python int
+    print(f"  - Index {idx.item()} (Category: {item['category']}): {item['text']}")
+
+
+print(
+    f"\nRetrieving top {TOP_K} memories for Neuron {NEURON_10_INDEX} (Intensity/Crisis)...\n"
+)
+top_indices_n10, top_values_n10 = retrieve_top_k_memories(
+    memory_trace, NEURON_10_INDEX, k=TOP_K
+)
+
+print(f"Retrieved indices: {top_indices_n10.tolist()}")
+print("Associated activations:", [f"{v:.4f}" for v in top_values_n10.tolist()])
+print("Corresponding Narratives:")
+for idx in top_indices_n10:
+    item = synthetic_data[idx.item()]  # Use .item() to get Python int
+    print(f"  - Index {idx.item()} (Category: {item['category']}): {item['text']}")
+
+# --- Perform Composite Retrieval ---
+print("\n--- Performing Composite Queries ---")
+
+# Query 1: Personal Distress without External Crisis (High N16, Low N10)
+print(
+    f"\nRetrieving top {TOP_K} memories for High N16 / Low N10 (Personal Distress Focus)..."
+)
+top_indices_p16_n10, top_scores_p16_n10 = retrieve_memories_composite(
+    memory_trace,
+    positive_neurons=[NEURON_16_INDEX],
+    negative_neurons=[NEURON_10_INDEX],
+    k=TOP_K,
+)
+print(f"Retrieved indices: {top_indices_p16_n10.tolist()}")
+print("Associated composite scores:", [f"{v:.4f}" for v in top_scores_p16_n10.tolist()])
+print("Corresponding Narratives:")
+for idx in top_indices_p16_n10:
+    item = synthetic_data[idx.item()]
+    # Show N16 and N10 activations for clarity
+    n16_act = memory_trace[idx.item(), NEURON_16_INDEX].item()
+    n10_act = memory_trace[idx.item(), NEURON_10_INDEX].item()
+    print(
+        f"  - Index {idx.item()} (Cat: {item['category']}, N16: {n16_act:.3f}, N10: {n10_act:.3f}): {item['text']}"
+    )
+
+# Query 2: External Crisis without Deep Personal Distress (High N10 > threshold, Low N16)
+print(
+    f"\nRetrieving top {TOP_K} memories for Refined External Crisis (N10 >= 0.5, penalized by N16)..."
+)
+CRISIS_THRESHOLD = 0.5  # Define the threshold
+top_indices_crisis_refined, top_scores_crisis_refined = retrieve_external_crisis(
+    memory_trace,
+    crisis_neuron=NEURON_10_INDEX,
+    distress_neuron=NEURON_16_INDEX,
+    threshold=CRISIS_THRESHOLD,
+    k=TOP_K,
+)
+
+if top_indices_crisis_refined.numel() > 0:
+    print(f"Retrieved indices: {top_indices_crisis_refined.tolist()}")
+    print(
+        "Associated composite scores (N10 - N16, for N10 >= threshold):",
+        [f"{v:.4f}" for v in top_scores_crisis_refined.tolist()],
+    )
+    print("Corresponding Narratives:")
+    for idx in top_indices_crisis_refined:
+        item = synthetic_data[idx.item()]
+        n16_act = memory_trace[idx.item(), NEURON_16_INDEX].item()
+        n10_act = memory_trace[idx.item(), NEURON_10_INDEX].item()
+        print(
+            f"  - Index {idx.item()} (Cat: {item['category']}, N16: {n16_act:.3f}, N10: {n10_act:.3f}): {item['text']}"
+        )
+else:
+    print("No memories met the refined external crisis criteria.")
+
+# Query 3: Routine-like (Low N10 and Low N16) - Maximize the NEGATIVE of their sum
+print(f"\nRetrieving top {TOP_K} memories for Low N10 & Low N16 (Routine Focus)...")
+# We want the MINIMUM sum of N10 and N16. TopK finds maximums.
+# So, we find the maximum of the NEGATIVE of their average activation.
+# Effectively, retrieve_memories_composite with only negative neurons maximizes the score = 0 - neg_penalty
+top_indices_routine, top_scores_routine = retrieve_memories_composite(
+    memory_trace,
+    positive_neurons=[],  # No positive contribution
+    negative_neurons=[NEURON_10_INDEX, NEURON_16_INDEX],
+    k=TOP_K,
+)
+# Note: The score here is -(Avg(N10, N16)), so higher score means lower activation
+print(f"Retrieved indices: {top_indices_routine.tolist()}")
+print(
+    "Associated composite scores (higher means lower N10/N16 activation):",
+    [f"{v:.4f}" for v in top_scores_routine.tolist()],
+)
+print("Corresponding Narratives:")
+for idx in top_indices_routine:
+    item = synthetic_data[idx.item()]
+    n16_act = memory_trace[idx.item(), NEURON_16_INDEX].item()
+    n10_act = memory_trace[idx.item(), NEURON_10_INDEX].item()
+    print(
+        f"  - Index {idx.item()} (Cat: {item['category']}, N16: {n16_act:.3f}, N10: {n10_act:.3f}): {item['text']}"
+    )
+
+# -------------------------------------\
+# 9. Further Analysis (Placeholder for original analysis plots if any)
+# -------------------------------------\
+print("\n--- Analysis/Retrieval Complete --- ")
+
+# --- Visualization Section ---
+print("\n--- Generating PCA Visualization --- ")
+
+# Check if memory_trace exists and has data
+if "memory_trace" in locals() and memory_trace.shape[0] > 0:
+    # 1. Perform PCA
+    print(f"Performing PCA on memory trace (shape: {memory_trace.shape})...")
+    pca = PCA(n_components=2)
+    # PCA expects numpy array, ensure memory_trace is CPU tensor then convert
+    memory_trace_np = (
+        memory_trace.numpy() if isinstance(memory_trace, torch.Tensor) else memory_trace
+    )
+    pca_result = pca.fit_transform(memory_trace_np)
+    print(f"PCA completed. Result shape: {pca_result.shape}")
+
+    # 2. Create Scatter Plot
+    plt.figure(figsize=(12, 8))
+    scatter_handles = []  # For custom legend
+    colors = plt.cm.viridis(np.linspace(0, 1, len(CATEGORIES)))
+
+    # Ensure category_indices and category_map are available from data prep section
+    if "category_indices" in locals() and "category_map" in locals():
+        category_list = [CATEGORIES[i] for i in category_indices.tolist()]
+        for i, category_name in enumerate(CATEGORIES):
+            # Find indices belonging to the current category
+            category_mask = category_indices == category_map[category_name]
+            # Plot points for this category
+            scatter = plt.scatter(
+                pca_result[category_mask, 0],
+                pca_result[category_mask, 1],
+                color=colors[i],
+                label=category_name,
+                alpha=0.6,  # Add some transparency
+                s=20,  # Adjust point size
+            )
+            scatter_handles.append(scatter)
+
+        plt.title("PCA of Narrative SAE Activations (Colored by Category)")
+        plt.xlabel("Principal Component 1")
+        plt.ylabel("Principal Component 2")
+        # plt.legend(handles=scatter_handles, title="Categories") # Modified legend below
+        plt.grid(True, linestyle="--", alpha=0.5)
+
+        # --- Highlight Retrieved Points ---
+        highlight_markers = ["X", "P", "s"]  # Markers for the 3 queries
+        highlight_colors = ["red", "lime", "blue"]  # Edge colors
+        highlight_labels = [
+            "Personal Distress Focus (Top 5)",
+            "Refined External Crisis (Top 5)",
+            "Routine Focus (Top 5)",
+        ]
+        highlight_indices_list = []
+
+        # Check if index variables exist before trying to use them
+        if "top_indices_p16_n10" in locals():
+            highlight_indices_list.append(top_indices_p16_n10)
+        else:
+            highlight_indices_list.append(None)
+
+        if "top_indices_crisis_refined" in locals():
+            highlight_indices_list.append(top_indices_crisis_refined)
+        else:
+            highlight_indices_list.append(None)
+
+        if "top_indices_routine" in locals():
+            highlight_indices_list.append(top_indices_routine)
+        else:
+            highlight_indices_list.append(None)
+
+        for i, indices_tensor in enumerate(highlight_indices_list):
+            if indices_tensor is not None and indices_tensor.numel() > 0:
+                indices = indices_tensor.tolist()
+                # Ensure indices are within bounds of pca_result
+                valid_indices = [idx for idx in indices if idx < pca_result.shape[0]]
+                if valid_indices:
+                    h_scatter = plt.scatter(
+                        pca_result[valid_indices, 0],
+                        pca_result[valid_indices, 1],
+                        marker=highlight_markers[i],
+                        s=150,  # Larger size
+                        edgecolor=highlight_colors[i],
+                        facecolor="none",  # No fill
+                        linewidth=1.5,
+                        label=highlight_labels[i],
+                    )
+                    scatter_handles.append(h_scatter)  # Add to legend items
+                else:
+                    print(
+                        f"Warning: Indices for '{highlight_labels[i]}' out of bounds or empty after validation."
+                    )
+            elif indices_tensor is None:
+                print(
+                    f"Warning: Indices variable for '{highlight_labels[i]}' not found."
+                )
+            # No need to print if numel is 0, retrieval function already warns
+
+        # Update legend to include highlight markers
+        plt.legend(
+            handles=scatter_handles, title="Categories & Queries", fontsize="small"
+        )
+
+        # 3. Save the Plot
+        pca_plot_path = "pca_narrative_activations_highlighted.png"  # New filename
+        try:
+            plt.savefig(pca_plot_path)
+            print(f"Saved highlighted PCA scatter plot to {pca_plot_path}")
+        except Exception as e:
+            print(f"Error saving highlighted PCA plot: {e}")
+        # plt.show() # Optional: Display plot
+
+    else:
+        print(
+            "Error: category_indices or category_map not found. Cannot create category plot."
+        )
+
+else:
+    print("Skipping PCA visualization: memory_trace not found or empty.")
+
+
+# (Original analysis code like plotting category centroids, sparsity, etc., would go here if needed)
+# Example: Plotting loss history (if training occurred)
+if not skip_training and "epoch_loss_history" in locals() and epoch_loss_history:
+    plt.figure(figsize=(10, 5))
+    plt.plot(epoch_loss_history, label="Total Fine-tuning Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Average Loss")
+    plt.title("Fine-tuning Loss Curve")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("finetuning_loss_curve.png")
+    print("Saved fine-tuning loss curve to finetuning_loss_curve.png")
+    # plt.show() # Optional: display plot
+
+# Optional: Add code for composite queries or other analyses here later
+# ...
+
+# Optional: Add code to evaluate cosine similarity, Euclidean distance, etc.
+# ...

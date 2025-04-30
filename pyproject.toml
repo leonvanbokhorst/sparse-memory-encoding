@@ -5,9 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "ipykernel>=6.29.5",
     "matplotlib>=3.10.1",
     "numpy>=2.2.5",
     "openai>=1.76.2",
+    "pca>=2.0.9",
     "sentence-transformers>=4.1.0",
     "torch>=2.7.0",
 ]
