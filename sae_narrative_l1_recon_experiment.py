@@ -420,4 +420,136 @@ avg_sparsity_all = (memory_trace < EPSILON).float().mean().item()
 print(f"\nOverall average activation across ALL traces: {avg_trace_activation_all:.4f}")
 print(f"Overall approximate sparsity across ALL traces: {avg_sparsity_all*100:.2f}%")
 
+
+# -------------------------------------
+# 10. Deep Neuron Role Analysis (Added based on guidance)
+# -------------------------------------
+print("\n--- Deep Neuron Role Analysis --- ")
+
+# --- Step 1: Identify Neuron Indices Clearly ---
+# Use a chosen threshold from the overlap analysis (e.g., 0.01)
+analysis_threshold = 0.01
+print(
+    f"Identifying neuron roles based on activation threshold: {analysis_threshold:.3f}"
+)
+
+# Ensure memory_trace is on CPU for this analysis if it wasn't already
+memory_trace_cpu = memory_trace.cpu()
+
+emotional_active_neurons = set(
+    torch.nonzero(memory_trace_cpu[0] > analysis_threshold).flatten().tolist()
+)
+chaotic_active_neurons = set(
+    torch.nonzero(memory_trace_cpu[1] > analysis_threshold).flatten().tolist()
+)
+routine_active_neurons = set(
+    torch.nonzero(memory_trace_cpu[4] > analysis_threshold).flatten().tolist()
+)
+
+print(f"\nActive neuron sets (Indices):")
+print(f"  Emotional (Ep 0): {sorted(list(emotional_active_neurons))}")
+print(f"  Chaotic   (Ep 1): {sorted(list(chaotic_active_neurons))}")
+print(f"  Routine   (Ep 4): {sorted(list(routine_active_neurons))}")
+
+
+# Determine shared and unique neurons
+shared_emo_routine = emotional_active_neurons.intersection(routine_active_neurons)
+shared_emo_chaotic = emotional_active_neurons.intersection(chaotic_active_neurons)
+shared_chaotic_routine = chaotic_active_neurons.intersection(routine_active_neurons)
+core_neurons = shared_emo_routine.intersection(chaotic_active_neurons)
+
+unique_emotional_neurons = (
+    emotional_active_neurons - chaotic_active_neurons - routine_active_neurons
+)
+unique_chaotic_neurons = (
+    chaotic_active_neurons - emotional_active_neurons - routine_active_neurons
+)
+unique_routine_neurons = (
+    routine_active_neurons - emotional_active_neurons - chaotic_active_neurons
+)
+
+print(f"\nIdentified Neuron Categories:")
+print(f"  Core (All Three):        {sorted(list(core_neurons))}")
+print(f"  Shared Emo & Routine:    {sorted(list(shared_emo_routine))}")
+print(f"  Shared Emo & Chaotic:    {sorted(list(shared_emo_chaotic))}")
+print(f"  Shared Chaotic & Routine:{sorted(list(shared_chaotic_routine))}")
+print(f"  Unique Emotional:        {sorted(list(unique_emotional_neurons))}")
+print(f"  Unique Chaotic:          {sorted(list(unique_chaotic_neurons))}")
+print(f"  Unique Routine:          {sorted(list(unique_routine_neurons))}")
+
+
+# --- Step 2: Extract Activation Profiles ---
+# Define the final list of neurons we definitely want to plot
+# Combine interesting shared and unique neurons, removing duplicates and sorting
+neurons_of_interest = sorted(
+    list(
+        core_neurons
+        | shared_emo_routine
+        | shared_emo_chaotic
+        | shared_chaotic_routine
+        | unique_emotional_neurons
+        | unique_chaotic_neurons
+        | unique_routine_neurons
+    )
+)
+
+if not neurons_of_interest:
+    print(
+        "\nNo consistently active neurons identified across key episodes. Skipping activation profile plotting."
+    )
+else:
+    print(
+        f"\nPlotting activation profiles for neurons of interest: {neurons_of_interest}"
+    )
+    activation_profiles = memory_trace_cpu[:, neurons_of_interest]
+
+    # Create labels for the plot
+    neuron_labels = []
+    for i in neurons_of_interest:
+        label = f"Neuron {i}"
+        tags = []
+        if i in core_neurons:
+            tags.append("Core")
+        if i in unique_emotional_neurons:
+            tags.append("Emo-Unique")
+        if i in unique_chaotic_neurons:
+            tags.append("Chaotic-Unique")
+        if i in unique_routine_neurons:
+            tags.append("Routine-Unique")
+        # Add shared tags if not core and part of a shared set
+        if i in shared_emo_routine and i not in core_neurons:
+            tags.append("Emo/Routine-Shared")
+        if i in shared_emo_chaotic and i not in core_neurons:
+            tags.append("Emo/Chaotic-Shared")
+        if i in shared_chaotic_routine and i not in core_neurons:
+            tags.append("Chaotic/Routine-Shared")
+
+        if tags:
+            label += f" ({', '.join(tags)})"
+        neuron_labels.append(label)
+
+    # --- Step 3: Analyze and Visualize ---
+    plt.figure(figsize=(15, 7))  # Wider figure for potentially many neurons
+    for idx, label in enumerate(neuron_labels):
+        plt.plot(
+            activation_profiles[:, idx].detach().numpy(),
+            label=label,
+            linewidth=1.5,
+            alpha=0.8,
+        )
+
+    # Add vertical lines to indicate the special episodes
+    plt.axvline(x=0, color="r", linestyle="--", linewidth=1, label="Ep 0 (Emotional)")
+    plt.axvline(x=1, color="g", linestyle="--", linewidth=1, label="Ep 1 (Chaotic)")
+    plt.axvline(x=4, color="b", linestyle="--", linewidth=1, label="Ep 4 (Routine)")
+
+    plt.title("Neuron Activation Profiles Across All Episodes")
+    plt.xlabel("Episode Index")
+    plt.ylabel("Activation Magnitude")
+    plt.legend(fontsize="small", loc="center left", bbox_to_anchor=(1, 0.5))
+    plt.grid(True, alpha=0.5)
+    plt.tight_layout(rect=[0, 0, 0.85, 1])  # Adjust layout to make space for legend
+    plt.show()
+
+
 print("\n--- Experiment Complete ---")
