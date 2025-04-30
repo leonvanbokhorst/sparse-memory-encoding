@@ -163,91 +163,110 @@ print("Initializing SAE model for fine-tuning...")
 model = SparseMemoryText(
     embedding_dim=EMBEDDING_DIM, event_size=EVENT_SIZE, compressed_size=COMPRESSED_SIZE
 )
+model.to(device)  # Move model to device early
 
-print(f"Loading pre-trained state dictionary from: {PRETRAINED_MODEL_PATH}")
-try:
-    state_dict = torch.load(PRETRAINED_MODEL_PATH, map_location="cpu")
-    model.load_state_dict(
-        state_dict, strict=False
-    )  # Load encoder/decoder, ignore projection
-    print("Loaded pre-trained encoder/decoder weights.")
-except Exception as e:
+# --- Check if FINE-TUNED model exists ---
+if os.path.exists(FINETUNED_MODEL_SAVE_PATH):
     print(
-        f"Warning: Could not load pre-trained weights from {PRETRAINED_MODEL_PATH}. Training from scratch. Error: {e}"
+        f"Found existing fine-tuned model at {FINETUNED_MODEL_SAVE_PATH}. Loading weights..."
     )
-
-model.to(device)  # Move entire model to target device
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-criterion_recon = nn.MSELoss(reduction="none")  # For weighted loss
-
-# -------------------------------------
-# 5. Fine-tuning Loop (with DataLoader)
-# -------------------------------------
-print(f"\n--- Starting Fine-tuning for {FINETUNE_EPOCHS} Epochs --- ")
-epoch_loss_history = []
-
-model.train()  # Set model to training mode
-for epoch in range(FINETUNE_EPOCHS):
-    epoch_total_loss = 0.0
-    epoch_recon_loss = 0.0
-    epoch_sparsity_loss = 0.0
-    num_batches = 0
-
-    for batch_embeddings, batch_recon_weights, batch_sparsity_weights in data_loader:
-        # Move batch data to the correct device
-        batch_embeddings = batch_embeddings.to(device)
-        batch_recon_weights = batch_recon_weights.to(device)
-        batch_sparsity_weights = batch_sparsity_weights.to(device)
-
-        optimizer.zero_grad()
-
-        reconstructed, encoded, projected = model(batch_embeddings)
-
-        # --- Weighted Reconstruction Loss ---
-        element_wise_recon_loss = criterion_recon(reconstructed, projected)
-        recon_loss_per_episode = torch.mean(element_wise_recon_loss, dim=1)
-        # Apply weights for this batch
-        weighted_recon_loss = (recon_loss_per_episode * batch_recon_weights).mean()
-
-        # --- Weighted L1 Sparsity Loss ---
-        l1_norm_per_episode = torch.norm(encoded, p=1, dim=1, keepdim=True)
-        weighted_l1_per_episode = (
-            l1_norm_per_episode * batch_sparsity_weights
-        )  # sparsity_weights is [N_batch, 1]
-        sparsity_loss = BETA_L1 * torch.mean(weighted_l1_per_episode)
-
-        # --- Total Loss ---
-        total_loss = weighted_recon_loss + sparsity_loss
-
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        epoch_total_loss += total_loss.item()
-        epoch_recon_loss += weighted_recon_loss.item()
-        epoch_sparsity_loss += sparsity_loss.item()
-        num_batches += 1
-
-    # Calculate average loss for the epoch
-    avg_epoch_total_loss = epoch_total_loss / num_batches
-    avg_epoch_recon_loss = epoch_recon_loss / num_batches
-    avg_epoch_sparsity_loss = epoch_sparsity_loss / num_batches
-    epoch_loss_history.append(avg_epoch_total_loss)
-
-    if epoch % 10 == 0 or epoch == FINETUNE_EPOCHS - 1:  # Print more frequently maybe
+    model.load_state_dict(torch.load(FINETUNED_MODEL_SAVE_PATH, map_location=device))
+    print("Fine-tuned weights loaded. Skipping training.")
+    skip_training = True
+else:
+    print(
+        f"No fine-tuned model found at {FINETUNED_MODEL_SAVE_PATH}. Loading pre-trained weights for fine-tuning..."
+    )
+    skip_training = False
+    try:
+        print(f"Loading pre-trained state dictionary from: {PRETRAINED_MODEL_PATH}")
+        state_dict = torch.load(PRETRAINED_MODEL_PATH, map_location="cpu")
+        model.load_state_dict(
+            state_dict, strict=False
+        )  # Load encoder/decoder, ignore projection
+        print("Loaded pre-trained encoder/decoder weights.")
+    except Exception as e:
         print(
-            f"Epoch {epoch:4d}/{FINETUNE_EPOCHS}, Avg Total Loss: {avg_epoch_total_loss:.6f}, "
-            f"Avg Recon Loss (W): {avg_epoch_recon_loss:.6f}, Avg Sparsity Loss: {avg_epoch_sparsity_loss:.6f}"
+            f"Warning: Could not load pre-trained weights from {PRETRAINED_MODEL_PATH}. Training from scratch. Error: {e}"
         )
 
-print("--- Fine-tuning complete ---")
+    # Optimizer and Criterion only needed if training
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    criterion_recon = nn.MSELoss(reduction="none")  # For weighted loss
 
 # -------------------------------------
-# 6. Save Fine-tuned Model
+# 5. Fine-tuning Loop (Conditional)
 # -------------------------------------
-print(f"Saving fine-tuned model to {FINETUNED_MODEL_SAVE_PATH}...")
-torch.save(model.state_dict(), FINETUNED_MODEL_SAVE_PATH)
-print("Fine-tuned model saved.")
+if not skip_training:
+    print(f"\n--- Starting Fine-tuning for {FINETUNE_EPOCHS} Epochs --- ")
+    epoch_loss_history = []
+
+    model.train()  # Set model to training mode
+    for epoch in range(FINETUNE_EPOCHS):
+        epoch_total_loss = 0.0
+        epoch_recon_loss = 0.0
+        epoch_sparsity_loss = 0.0
+        num_batches = 0
+
+        for (
+            batch_embeddings,
+            batch_recon_weights,
+            batch_sparsity_weights,
+        ) in data_loader:
+            # Move batch data to the correct device
+            batch_embeddings = batch_embeddings.to(device)
+            batch_recon_weights = batch_recon_weights.to(device)
+            batch_sparsity_weights = batch_sparsity_weights.to(device)
+
+            optimizer.zero_grad()
+
+            reconstructed, encoded, projected = model(batch_embeddings)
+
+            # --- Weighted Reconstruction Loss ---
+            element_wise_recon_loss = criterion_recon(reconstructed, projected)
+            recon_loss_per_episode = torch.mean(element_wise_recon_loss, dim=1)
+            # Apply weights for this batch
+            weighted_recon_loss = (recon_loss_per_episode * batch_recon_weights).mean()
+
+            # --- Weighted L1 Sparsity Loss ---
+            l1_norm_per_episode = torch.norm(encoded, p=1, dim=1, keepdim=True)
+            weighted_l1_per_episode = (
+                l1_norm_per_episode * batch_sparsity_weights
+            )  # sparsity_weights is [N_batch, 1]
+            sparsity_loss = BETA_L1 * torch.mean(weighted_l1_per_episode)
+
+            # --- Total Loss ---
+            total_loss = weighted_recon_loss + sparsity_loss
+
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            epoch_total_loss += total_loss.item()
+            epoch_recon_loss += weighted_recon_loss.item()
+            epoch_sparsity_loss += sparsity_loss.item()
+            num_batches += 1
+
+        # Calculate average loss for the epoch
+        avg_epoch_total_loss = epoch_total_loss / num_batches
+        avg_epoch_recon_loss = epoch_recon_loss / num_batches
+        avg_epoch_sparsity_loss = epoch_sparsity_loss / num_batches
+        epoch_loss_history.append(avg_epoch_total_loss)
+
+        if epoch % 10 == 0 or epoch == FINETUNE_EPOCHS - 1:
+            print(
+                f"Epoch {epoch:4d}/{FINETUNE_EPOCHS}, Avg Total Loss: {avg_epoch_total_loss:.6f}, "
+                f"Avg Recon Loss (W): {avg_epoch_recon_loss:.6f}, Avg Sparsity Loss: {avg_epoch_sparsity_loss:.6f}"
+            )
+
+    print("--- Fine-tuning complete ---")
+
+    # -------------------------------------
+    # 6. Save Fine-tuned Model
+    # -------------------------------------
+    print(f"Saving fine-tuned model to {FINETUNED_MODEL_SAVE_PATH}...")
+    torch.save(model.state_dict(), FINETUNED_MODEL_SAVE_PATH)
+    print("Fine-tuned model saved.")
 
 # -------------------------------------
 # 7. Post-tuning Analysis (Neuron Roles)
@@ -599,3 +618,98 @@ print("\n--- Full Analysis Complete ---")
 
 # (Old TODOs remain relevant - could add cosine sim etc. later)
 # (TODO: Add visualization of activation profiles for text data)
+
+# -------------------------------------\
+# 8. Analysis & Retrieval (NEW SECTION)
+# -------------------------------------\
+print("\n--- Starting Analysis & Retrieval --- ")
+
+model.eval()  # Set model to evaluation mode
+
+# --- Calculate Full Memory Trace ---
+print("Calculating full memory trace (neuron activations) for the dataset...")
+with torch.no_grad():
+    # Move all embeddings to the device at once for faster processing if memory allows
+    all_embeddings_device = embeddings_tensor.to(device)
+    _, all_encoded_activations, _ = model(all_embeddings_device)
+    memory_trace = (
+        all_encoded_activations.cpu()
+    )  # Move back to CPU for analysis/indexing
+print(
+    f"Memory trace calculated. Shape: {memory_trace.shape}"
+)  # Should be [num_samples, COMPRESSED_SIZE]
+
+
+# --- Define Retrieval Functions ---
+def retrieve_top_k_memories(trace, neuron_index, k=5):
+    """Retrieves the indices of memories with the highest activation for a specific neuron."""
+    if neuron_index < 0 or neuron_index >= trace.shape[1]:
+        print(
+            f"Error: Neuron index {neuron_index} out of bounds (0-{trace.shape[1]-1})."
+        )
+        return torch.tensor([], dtype=torch.long)
+    neuron_activations = trace[:, neuron_index]
+    top_k_values, top_k_indices = torch.topk(
+        neuron_activations, k=min(k, len(trace))
+    )  # Ensure k is not > trace length
+    return top_k_indices, top_k_values
+
+
+# --- Perform Retrieval ---
+NEURON_16_INDEX = 16  # Personal Distress Specialist
+NEURON_10_INDEX = 10  # Emotional Intensity & Crisis Indicator
+TOP_K = 5
+
+print(
+    f"\nRetrieving top {TOP_K} memories for Neuron {NEURON_16_INDEX} (Personal Distress)...\n"
+)
+top_indices_n16, top_values_n16 = retrieve_top_k_memories(
+    memory_trace, NEURON_16_INDEX, k=TOP_K
+)
+
+print(f"Retrieved indices: {top_indices_n16.tolist()}")
+print("Associated activations:", [f"{v:.4f}" for v in top_values_n16.tolist()])
+print("Corresponding Narratives:")
+for idx in top_indices_n16:
+    item = synthetic_data[idx.item()]  # Use .item() to get Python int
+    print(f"  - Index {idx.item()} (Category: {item['category']}): {item['text']}")
+
+
+print(
+    f"\nRetrieving top {TOP_K} memories for Neuron {NEURON_10_INDEX} (Intensity/Crisis)...\n"
+)
+top_indices_n10, top_values_n10 = retrieve_top_k_memories(
+    memory_trace, NEURON_10_INDEX, k=TOP_K
+)
+
+print(f"Retrieved indices: {top_indices_n10.tolist()}")
+print("Associated activations:", [f"{v:.4f}" for v in top_values_n10.tolist()])
+print("Corresponding Narratives:")
+for idx in top_indices_n10:
+    item = synthetic_data[idx.item()]  # Use .item() to get Python int
+    print(f"  - Index {idx.item()} (Category: {item['category']}): {item['text']}")
+
+# -------------------------------------\
+# 9. Further Analysis (Placeholder for original analysis plots if any)
+# -------------------------------------\
+print("\n--- Analysis/Retrieval Complete --- ")
+
+# (Original analysis code like plotting category centroids, sparsity, etc., would go here if needed)
+# Example: Plotting loss history (if training occurred)
+if not skip_training and epoch_loss_history:
+    plt.figure(figsize=(10, 5))
+    plt.plot(epoch_loss_history, label="Total Fine-tuning Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Average Loss")
+    plt.title("Fine-tuning Loss Curve")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("finetuning_loss_curve.png")
+    print("Saved fine-tuning loss curve to finetuning_loss_curve.png")
+    # plt.show() # Optional: display plot
+
+# Optional: Add code for composite queries or other analyses here later
+# ...
+
+# Optional: Add code to evaluate cosine similarity, Euclidean distance, etc.
+# ...
