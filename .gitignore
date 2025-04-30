@@ -2,8 +2,4 @@
 .env
 *.pth
 *.pt
-*.pt.gz
-*.pt.tar.gz
-*.pt.tar.gz.part
-*.pt.tar.gz.part.1
-*.pt.tar.gz.part.2
+__pycache__/
