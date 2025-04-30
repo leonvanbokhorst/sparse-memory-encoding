@@ -8,8 +8,8 @@ import json  # To load the generated data
 import os
 
 # Ensure reproducibility if needed (optional)
-# torch.manual_seed(42)
-# np.random.seed(42)
+torch.manual_seed(42)
+np.random.seed(42)
 
 
 # -------------------------------------
@@ -51,7 +51,7 @@ FINETUNED_MODEL_SAVE_PATH = "sae_text_finetuned.pth"
 # --- Fine-tuning Hyperparameters ---
 FINETUNE_EPOCHS = 200  # Adjust as needed
 LEARNING_RATE = 1e-4  # Lower LR for fine-tuning
-BETA_L1 = 0.0005  # Sparsity strength (can tune)
+BETA_L1 = 0.002  # Sparsity strength (Increased further from 0.001)
 BATCH_SIZE = 32  # Add batch size for training on larger data
 
 # --- Simplified Category Names ---
@@ -255,6 +255,7 @@ print("Fine-tuned model saved.")
 print("\n--- Analyzing Neuron Activations of Fine-tuned Model --- ")
 model.eval()  # Set model to evaluation mode
 results_finetuned = {}
+all_memory_traces = {}  # Store traces for overall analysis later if needed
 
 # Process samples category by category for easier analysis aggregation
 with torch.no_grad():
@@ -272,25 +273,28 @@ with torch.no_grad():
 
         # Get traces - we only need the middle output (encoded)
         _, memory_traces, _ = model(embeddings)
+        memory_traces_cpu = memory_traces.cpu()  # Move to CPU for numpy/analysis
         results_finetuned[category] = {
             "texts": category_texts,
-            "memory_traces": memory_traces.cpu().numpy(),
+            "memory_traces": memory_traces_cpu.numpy(),  # Keep original numpy format if needed elsewhere
+            "memory_traces_tensor": memory_traces_cpu,  # Store tensor for easier pytorch ops
         }
+        all_memory_traces[category] = memory_traces_cpu  # Collect all traces
 
-# --- Analysis Code ---
-print(f"Analyzing neurons originally identified (from sine): {NEURONS_TO_ANALYZE}")
+
+# --- 7a. Analysis of Previously Identified Sine-Wave Neurons (For Comparison) ---
+print(f"\n--- 7a. Analysis of Sine-Wave Neurons ({NEURONS_TO_ANALYZE}) ---")
 print(
     "(Sine Core={CORE_NEURONS_SINE}, Sine Unique Emo={UNIQUE_EMO_NEURONS_SINE}, Sine Unique Routine={UNIQUE_ROUTINE_NEURONS_SINE})"
 )
-
-activation_summary = {}
+activation_summary_sine = {}
 for category, data in results_finetuned.items():
-    print(f"\n{category} Texts (Post Fine-tuning, {len(data['texts'])} samples):")
-    traces = data["memory_traces"]
+    print(f"\n{category} Texts (Sine Neuron Focus, {len(data['texts'])} samples):")
+    traces_np = data["memory_traces"]  # Use numpy array here
     # Ensure we handle cases where NEURONS_TO_ANALYZE might be empty or invalid
-    if NEURONS_TO_ANALYZE and traces.shape[1] > max(NEURONS_TO_ANALYZE):
-        avg_activations = np.mean(traces[:, NEURONS_TO_ANALYZE], axis=0)
-        activation_summary[category] = avg_activations
+    if NEURONS_TO_ANALYZE and traces_np.shape[1] > max(NEURONS_TO_ANALYZE):
+        avg_activations = np.mean(traces_np[:, NEURONS_TO_ANALYZE], axis=0)
+        activation_summary_sine[category] = avg_activations
         print(
             f"  Avg Activations ({NEURONS_TO_ANALYZE}): {[f'{act:.4f}' for act in avg_activations]}"
         )
@@ -331,9 +335,267 @@ for category, data in results_finetuned.items():
         )
 
 print(
-    "\nNote: Roles of neurons likely shifted during fine-tuning. Full analysis needed."
+    "\nNote: Roles of sine-wave neurons likely shifted during fine-tuning. Deeper analysis follows."
 )
-print("Analysis Complete. Check if neuron roles align with text categories.")
 
-# (TODO: Add de novo analysis - e.g., find top k active neurons per category)
+
+# --- 7b. De Novo Analysis Across ALL Neurons ---
+print(f"\n--- 7b. De Novo Analysis (All {COMPRESSED_SIZE} Neurons) ---")
+k_top = 5  # Number of top neurons to display
+sparsity_threshold = 0.01  # Threshold for sparsity calculation
+category_avg_activations = {}  # To store average activations for plotting
+
+for category in CATEGORIES:
+    if category not in results_finetuned:
+        print(f"\nSkipping De Novo analysis for {category} (no data).")
+        continue
+
+    print(f"\nAnalyzing Category: {category}")
+    data = results_finetuned[category]
+    memory_traces = data["memory_traces_tensor"]  # Use the tensor version
+
+    if memory_traces is None or memory_traces.nelement() == 0:
+        print("  No memory traces found for this category.")
+        continue
+
+    # --- Calculate Average Activations (All Neurons) ---
+    avg_activations_all = memory_traces.mean(dim=0)
+    category_avg_activations[category] = (
+        avg_activations_all.numpy()
+    )  # Store numpy for plotting
+
+    # --- Top-k Neuron Analysis ---
+    if avg_activations_all.nelement() > 0:
+        # Ensure k is not larger than the number of neurons
+        actual_k = min(k_top, avg_activations_all.shape[0])
+        top_k_values, top_k_indices = torch.topk(avg_activations_all, actual_k)
+        print(f"  Top {actual_k} Neurons (Index: Avg Activation):")
+        for i in range(actual_k):
+            print(
+                f"    Neuron {top_k_indices[i].item():2d}: {top_k_values[i].item():.4f}"
+            )
+    else:
+        print("  Could not calculate top-k neurons (no activations).")
+
+    # --- Quantitative Sparsity Check ---
+    sparsity_level = (memory_traces < sparsity_threshold).float().mean().item()
+    print(f"  Sparsity (< {sparsity_threshold}): {sparsity_level*100:.2f}%")
+
+
+# --- 7c. Visualization of All Neuron Activations ---
+print(f"\n--- 7c. Visualization (All {COMPRESSED_SIZE} Neurons) ---")
+
+if not category_avg_activations:
+    print("No data available for visualization.")
+else:
+    plt.figure(figsize=(15, 7))  # Adjusted size
+    num_neurons = COMPRESSED_SIZE
+    bar_width = 0.25
+    index = np.arange(num_neurons)
+
+    categories_present = list(category_avg_activations.keys())
+
+    for i, category in enumerate(categories_present):
+        plt.bar(
+            index + i * bar_width,
+            category_avg_activations[category],
+            bar_width,
+            label=category,
+        )
+
+    plt.xlabel("Neuron Index")
+    plt.ylabel("Average Activation")
+    plt.title("Average Neuron Activations by Narrative Category (Post Fine-tuning)")
+    plt.xticks(
+        index + bar_width * (len(categories_present) - 1) / 2, index
+    )  # Center ticks
+    plt.legend()
+    plt.grid(axis="y", linestyle="--", alpha=0.7)
+    plt.tight_layout()  # Adjust layout
+
+    # Save the plot
+    plot_save_path = "neuron_activation_comparison.png"
+    try:
+        plt.savefig(plot_save_path)
+        print(f"Saved activation comparison plot to {plot_save_path}")
+    except Exception as e:
+        print(f"Error saving plot: {e}")
+    # plt.show() # Optional: Display plot if running interactively
+
+
+# --- 7d. Qualitative Neuron Interpretation (Top Activating Texts) ---
+print(f"\n--- 7d. Qualitative Neuron Interpretation (Top Activating Texts) ---")
+
+# Ensure we have all traces and corresponding texts
+if not all_memory_traces:
+    print("No memory traces collected for qualitative analysis.")
+else:
+    # Concatenate traces from all categories
+    all_traces_list = [
+        t for cat_traces in all_memory_traces.values() for t in cat_traces
+    ]
+    if not all_traces_list:
+        print("Collected memory traces are empty.")
+    else:
+        # Assuming all_texts list corresponds to the order of data loading before splitting
+        # Make sure all_texts is the original full list loaded from JSON
+        try:
+            # Check if all_texts was defined earlier and matches expected length
+            if "all_texts" not in locals() or len(all_texts) != len(all_traces_list):
+                print(
+                    "Error: Mismatch between number of texts and number of traces. Re-check data prep."
+                )
+                # Fallback or re-fetch all_texts if necessary
+                print("Attempting to re-fetch texts...")
+                all_texts = [item["text"] for item in synthetic_data]
+                if len(all_texts) != len(all_traces_list):
+                    raise ValueError(
+                        "Fatal Error: Cannot align texts and traces for analysis."
+                    )
+
+            all_memory_traces_tensor = torch.cat(
+                list(all_memory_traces.values()), dim=0
+            )
+            num_total_samples, num_neurons_check = all_memory_traces_tensor.shape
+
+            if num_neurons_check != COMPRESSED_SIZE:
+                print(
+                    f"Warning: Concatenated traces have {num_neurons_check} features, expected {COMPRESSED_SIZE}."
+                )
+
+            if num_total_samples != len(all_texts):
+                print(
+                    f"Warning: Number of concatenated traces ({num_total_samples}) doesn't match number of texts ({len(all_texts)}). Alignment might be incorrect."
+                )
+
+            print(f"Analyzing top texts for {num_total_samples} total samples.")
+
+            # --- Focus on key neurons from the successful BETA_L1 = 0.002 run (with seeds) ---
+            top_neurons_to_interpret = [16, 10]  # Actual dominant neurons in this run
+            k_texts = 5  # Number of top texts to show per neuron
+
+            # (Optional: Can add back 25, 14 later if needed for comparison)
+            # old_neurons = [25, 14]
+            # for neuron_index in old_neurons: ...
+
+            for neuron_index in top_neurons_to_interpret:
+                if neuron_index >= num_neurons_check:
+                    print(
+                        f"\nSkipping Neuron {neuron_index} (index out of bounds for traces with {num_neurons_check} neurons)."
+                    )
+                    continue
+
+                print(
+                    f"\n--- Top {k_texts} texts activating Neuron {neuron_index} --- "
+                )
+                try:
+                    # Get activations for the specific neuron across all samples
+                    neuron_activations = all_memory_traces_tensor[:, neuron_index]
+
+                    # Find the top k activations and their original indices
+                    top_k_values, top_k_indices = torch.topk(
+                        neuron_activations, k_texts
+                    )
+
+                    # Retrieve the corresponding texts
+                    top_k_texts = [all_texts[i] for i in top_k_indices.tolist()]
+
+                    # Print the texts and their activation values
+                    for i in range(k_texts):
+                        print(
+                            f'  Activation: {top_k_values[i].item():.4f} - Text: "{top_k_texts[i]}"'
+                        )
+
+                except IndexError as e:
+                    print(
+                        f"Error accessing text for neuron {neuron_index}: {e}. Check alignment of texts and traces."
+                    )
+                except Exception as e:
+                    print(
+                        f"An unexpected error occurred during analysis for neuron {neuron_index}: {e}"
+                    )
+
+        except NameError:
+            print(
+                "Error: 'all_texts' variable not found. Cannot perform qualitative analysis."
+            )
+        except ValueError as e:
+            print(e)
+        except Exception as e:
+            print(
+                f"An unexpected error occurred preparing data for qualitative analysis: {e}"
+            )
+
+
+# --- 7e. Quantitative Category Similarity Analysis ---
+print(f"\n--- 7e. Quantitative Category Similarity Analysis ---")
+
+if not category_avg_activations or len(category_avg_activations) < len(CATEGORIES):
+    print(
+        "Average activations for all categories not available. Skipping similarity analysis."
+    )
+elif np is None:  # Check if numpy was imported successfully earlier
+    print("Numpy not available. Skipping similarity analysis.")
+else:
+    try:
+        # Ensure the order matches CATEGORIES for consistent matrix interpretation
+        avg_vectors_list = [
+            category_avg_activations[cat]
+            for cat in CATEGORIES
+            if cat in category_avg_activations
+        ]
+        present_categories = [
+            cat for cat in CATEGORIES if cat in category_avg_activations
+        ]
+
+        if len(avg_vectors_list) < 2:
+            print("Need average activations for at least two categories to compare.")
+        else:
+            avg_vectors = np.array(
+                avg_vectors_list
+            )  # Shape [num_categories, num_neurons]
+
+            # --- Cosine Similarity Calculation (using numpy) ---
+            print("\nCalculating Cosine Similarity...")
+            # Normalize vectors
+            norms = np.linalg.norm(avg_vectors, axis=1, keepdims=True)
+            # Handle potential zero vectors (though unlikely with ReLU activations)
+            norms[norms == 0] = 1e-10  # Avoid division by zero
+            normalized_vectors = avg_vectors / norms
+            # Calculate cosine similarity matrix
+            cosine_sim_matrix = normalized_vectors @ normalized_vectors.T
+
+            print("Cosine Similarity Matrix:")
+            print(
+                "        " + "   ".join([f"{cat[:5]:<5}" for cat in present_categories])
+            )
+            for i, cat_row in enumerate(present_categories):
+                print(
+                    f"{cat_row[:5]:<5}   "
+                    + "   ".join(
+                        [
+                            f"{cosine_sim_matrix[i, j]:.4f}"
+                            for j in range(len(present_categories))
+                        ]
+                    )
+                )
+
+            # --- Euclidean Distance Calculation (using numpy) ---
+            print("\nCalculating Euclidean Distances...")
+            distances = {}
+            for i in range(len(present_categories)):
+                for j in range(i + 1, len(present_categories)):
+                    cat1 = present_categories[i]
+                    cat2 = present_categories[j]
+                    distance = np.linalg.norm(avg_vectors[i] - avg_vectors[j])
+                    distances[f"{cat1}-{cat2}"] = distance
+                    print(f"  Distance ({cat1} <-> {cat2}): {distance:.4f}")
+
+    except Exception as e:
+        print(f"An error occurred during similarity analysis: {e}")
+
+
+print("\n--- Full Analysis Complete ---")
+
+# (Old TODOs remain relevant - could add cosine sim etc. later)
 # (TODO: Add visualization of activation profiles for text data)
