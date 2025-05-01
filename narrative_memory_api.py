@@ -35,12 +35,17 @@ class SparseMemoryText(nn.Module):
 
 # --- Narrative Memory API Class ---
 
+# Key Neuron Roles (for default sae_text_finetuned.pth with BETA_L1=0.001):
+# Neuron 4: Emotional Intensity / Salience / Confrontation / Loss
+# Neuron 13: Structured Thought / Scene Description / Planning / Complexity
+# Neuron 27: External Chaos / Overwhelm / Systemic Conflict / Disorder
+
 
 class NarrativeMemoryAPI:
     def __init__(
         self,
         model_path="sae_text_finetuned.pth",
-        data_path="synthetic_narrative_data.json",
+        data_path="processed_batches/results_batch_68132475ee8481908e4db8b9c4605c0c.json",  # NEW Default
         embedding_model_name="all-MiniLM-L6-v2",
         embedding_dim=384,  # From config
         event_size=300,  # From config
@@ -234,46 +239,49 @@ class NarrativeMemoryAPI:
 
         return top_k_indices, top_k_values
 
-    def retrieve_external_crisis(
-        self, crisis_neuron=10, distress_neuron=16, threshold=0.5, k=5
-    ):
-        """Refined retrieval for external crisis narratives."""
+    # --- NEW High-Level Composite Queries ---
+
+    def retrieve_intensity_without_chaos(self, k=5):
+        """Retrieves narratives with high emotional intensity (N4) but low external chaos (N27)."""
         print(
-            f"\nRetrieving top {k} refined external crisis (N{crisis_neuron}>={threshold}, penalized by N{distress_neuron})..."
+            f"\nRetrieving top {k} for Intensity without Chaos (High N4 / Low N27)..."
         )
-        if (
-            crisis_neuron < 0
-            or crisis_neuron >= self.compressed_size
-            or distress_neuron < 0
-            or distress_neuron >= self.compressed_size
-        ):
-            print(f"Error: Neuron indices out of bounds (0-{self.compressed_size-1}).")
-            return torch.tensor([], dtype=torch.long), torch.tensor(
-                [], dtype=torch.float
-            )
+        # Indices assume default model: N4 (Intensity), N27 (Chaos)
+        return self.retrieve_memories_composite(
+            positive_neurons=[4], negative_neurons=[27], k=k
+        )
 
-        crisis_activation = self.memory_trace[:, crisis_neuron]
-        valid_indices = (crisis_activation >= threshold).nonzero(as_tuple=True)[0]
+    def retrieve_structure_in_chaos(self, k=5):
+        """Retrieves narratives exhibiting structure/planning (N13) amidst external chaos (N27)."""
+        print(f"\nRetrieving top {k} for Structure in Chaos (High N13 & N27)...")
+        # Indices assume default model: N13 (Structure), N27 (Chaos)
+        return self.retrieve_memories_composite(
+            positive_neurons=[13, 27], negative_neurons=[], k=k
+        )
 
-        if valid_indices.numel() == 0:
-            print(
-                f"No memories found with Neuron {crisis_neuron} activation >= {threshold}"
-            )
-            return torch.tensor([], dtype=torch.long), torch.tensor(
-                [], dtype=torch.float
-            )
-
+    def retrieve_routine_structure(self, k=5):
+        """Retrieves narratives focused on routine/structure (High N13) without high emotion (N4) or chaos (N27)."""
         print(
-            f"Found {valid_indices.numel()} memories with Neuron {crisis_neuron} >= {threshold}"
+            f"\nRetrieving top {k} for Routine Structure (High N13 / Low N4 & N27)..."
         )
-        filtered_trace = self.memory_trace[valid_indices]
-        scores = filtered_trace[:, crisis_neuron] - filtered_trace[:, distress_neuron]
+        # Indices assume default model: N13 (Structure), N4 (Intensity), N27 (Chaos)
+        return self.retrieve_memories_composite(
+            positive_neurons=[13], negative_neurons=[4, 27], k=k
+        )
 
-        actual_k = min(k, scores.size(0))
-        top_k_scores, top_k_relative_indices = torch.topk(scores, actual_k)
-        top_k_original_indices = valid_indices[top_k_relative_indices]
+    # --- Deprecated/Old Methods ---
 
-        return top_k_original_indices, top_k_scores
+    # def retrieve_external_crisis(
+    #     self, crisis_neuron=10, distress_neuron=16, threshold=0.5, k=5
+    # ):
+    #     """DEPRECATED: Relied on neuron roles from older models."""
+    #     print(
+    #         f"\nDEPRECATED: Retrieving top {k} refined external crisis (N{crisis_neuron}>={threshold}, penalized by N{distress_neuron})..."
+    #     )
+    #     # ... (Implementation removed for brevity or kept commented out)
+    #     pass
+
+    # --- Utility Methods ---
 
     def get_activations(self, indices):
         """Returns the full activation vectors for the given indices."""

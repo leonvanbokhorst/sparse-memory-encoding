@@ -52,8 +52,8 @@ FINETUNED_MODEL_SAVE_PATH = "sae_text_finetuned.pth"
 
 # --- Fine-tuning Hyperparameters ---
 FINETUNE_EPOCHS = 200  # Adjust as needed
-LEARNING_RATE = 1e-4  # Lower LR for fine-tuning
-BETA_L1 = 0.002  # Sparsity strength (Increased further from 0.001)
+LEARNING_RATE = 5e-5  # NEW Lower LR (0.00005)
+BETA_L1 = 0.001  # NEW Slightly reduced sparsity pressure
 BATCH_SIZE = 32  # Add batch size for training on larger data
 
 # --- Simplified Category Names ---
@@ -491,12 +491,12 @@ else:
 
             print(f"Analyzing top texts for {num_total_samples} total samples.")
 
-            # --- Focus on key neurons from the successful BETA_L1 = 0.002 run (with seeds) ---
-            top_neurons_to_interpret = [16, 10]  # Actual dominant neurons in this run
-            k_texts = 5  # Number of top texts to show per neuron
+            # --- Focus on key neurons from the successful BETA_L1 = 0.001 run ---
+            top_neurons_to_interpret = [4, 13, 27]  # Updated neuron indices
+            k_texts = 10  # NEW Number of top texts to show per neuron
 
-            # (Optional: Can add back 25, 14 later if needed for comparison)
-            # old_neurons = [25, 14]
+            # (Optional: Can add back 10, 16 later if needed for comparison)
+            # old_neurons = [10, 16]
             # for neuron_index in old_neurons: ...
 
             for neuron_index in top_neurons_to_interpret:
@@ -735,123 +735,145 @@ def retrieve_external_crisis(trace, crisis_neuron, distress_neuron, threshold=0.
 
 
 # --- Perform Retrieval (Single Neuron) ---
-NEURON_16_INDEX = 16  # Personal Distress Specialist
-NEURON_10_INDEX = 10  # Emotional Intensity & Crisis Indicator
+# NEURON_16_INDEX = 16 # OLD - Personal Distress Specialist
+# NEURON_10_INDEX = 10 # OLD - Emotional Intensity & Crisis Indicator
+NEURON_4_INDEX = 4  # NEW - Emotional Intensity / Salience
+NEURON_13_INDEX = 13  # NEW - Structured Thought / Scene / Planning
+NEURON_27_INDEX = 27  # NEW - External Chaos / Overwhelm
 TOP_K = 5
 
 print(
-    f"\nRetrieving top {TOP_K} memories for Neuron {NEURON_16_INDEX} (Personal Distress)...\n"
+    f"\nRetrieving top {TOP_K} memories for Neuron {NEURON_4_INDEX} (Emotional Intensity/Salience)...\n"
 )
-top_indices_n16, top_values_n16 = retrieve_top_k_memories(
-    memory_trace, NEURON_16_INDEX, k=TOP_K
+top_indices_n4, top_values_n4 = retrieve_top_k_memories(
+    memory_trace, NEURON_4_INDEX, k=TOP_K
 )
-
-print(f"Retrieved indices: {top_indices_n16.tolist()}")
-print("Associated activations:", [f"{v:.4f}" for v in top_values_n16.tolist()])
+print(f"Retrieved indices: {top_indices_n4.tolist()}")
+print("Associated activations:", [f"{v:.4f}" for v in top_values_n4.tolist()])
 print("Corresponding Narratives:")
-for idx in top_indices_n16:
+for idx in top_indices_n4:
+    item = synthetic_data[idx.item()]  # Use .item() to get Python int
+    print(f"  - Index {idx.item()} (Category: {item['category']}): {item['text']}")
+
+print(
+    f"\nRetrieving top {TOP_K} memories for Neuron {NEURON_13_INDEX} (Structure/Scene/Planning)...\n"
+)
+top_indices_n13, top_values_n13 = retrieve_top_k_memories(
+    memory_trace, NEURON_13_INDEX, k=TOP_K
+)
+print(f"Retrieved indices: {top_indices_n13.tolist()}")
+print("Associated activations:", [f"{v:.4f}" for v in top_values_n13.tolist()])
+print("Corresponding Narratives:")
+for idx in top_indices_n13:
+    item = synthetic_data[idx.item()]  # Use .item() to get Python int
+    print(f"  - Index {idx.item()} (Category: {item['category']}): {item['text']}")
+
+print(
+    f"\nRetrieving top {TOP_K} memories for Neuron {NEURON_27_INDEX} (External Chaos/Overwhelm)...\n"
+)
+top_indices_n27, top_values_n27 = retrieve_top_k_memories(
+    memory_trace, NEURON_27_INDEX, k=TOP_K
+)
+print(f"Retrieved indices: {top_indices_n27.tolist()}")
+print("Associated activations:", [f"{v:.4f}" for v in top_values_n27.tolist()])
+print("Corresponding Narratives:")
+for idx in top_indices_n27:
     item = synthetic_data[idx.item()]  # Use .item() to get Python int
     print(f"  - Index {idx.item()} (Category: {item['category']}): {item['text']}")
 
 
+# --- Perform Composite Retrieval --- (Updated Examples)
+print("\n--- Performing NEW Composite Queries ---")
+
+# Query 1: Emotional Intensity without External Chaos (High N4, Low N27)
 print(
-    f"\nRetrieving top {TOP_K} memories for Neuron {NEURON_10_INDEX} (Intensity/Crisis)...\n"
+    f"\nRetrieving top {TOP_K} memories for High N4 / Low N27 (Intensity without Chaos)..."
 )
-top_indices_n10, top_values_n10 = retrieve_top_k_memories(
-    memory_trace, NEURON_10_INDEX, k=TOP_K
-)
-
-print(f"Retrieved indices: {top_indices_n10.tolist()}")
-print("Associated activations:", [f"{v:.4f}" for v in top_values_n10.tolist()])
-print("Corresponding Narratives:")
-for idx in top_indices_n10:
-    item = synthetic_data[idx.item()]  # Use .item() to get Python int
-    print(f"  - Index {idx.item()} (Category: {item['category']}): {item['text']}")
-
-# --- Perform Composite Retrieval ---
-print("\n--- Performing Composite Queries ---")
-
-# Query 1: Personal Distress without External Crisis (High N16, Low N10)
-print(
-    f"\nRetrieving top {TOP_K} memories for High N16 / Low N10 (Personal Distress Focus)..."
-)
-top_indices_p16_n10, top_scores_p16_n10 = retrieve_memories_composite(
+top_indices_p4_n27, top_scores_p4_n27 = retrieve_memories_composite(
     memory_trace,
-    positive_neurons=[NEURON_16_INDEX],
-    negative_neurons=[NEURON_10_INDEX],
+    positive_neurons=[NEURON_4_INDEX],
+    negative_neurons=[NEURON_27_INDEX],
     k=TOP_K,
 )
-print(f"Retrieved indices: {top_indices_p16_n10.tolist()}")
-print("Associated composite scores:", [f"{v:.4f}" for v in top_scores_p16_n10.tolist()])
+print(f"Retrieved indices: {top_indices_p4_n27.tolist()}")
+print(
+    "Associated composite scores (N4 - N27):",
+    [f"{v:.4f}" for v in top_scores_p4_n27.tolist()],
+)
 print("Corresponding Narratives:")
-for idx in top_indices_p16_n10:
+for idx in top_indices_p4_n27:
     item = synthetic_data[idx.item()]
-    # Show N16 and N10 activations for clarity
-    n16_act = memory_trace[idx.item(), NEURON_16_INDEX].item()
-    n10_act = memory_trace[idx.item(), NEURON_10_INDEX].item()
+    n4_act = memory_trace[idx.item(), NEURON_4_INDEX].item()
+    n27_act = memory_trace[idx.item(), NEURON_27_INDEX].item()
     print(
-        f"  - Index {idx.item()} (Cat: {item['category']}, N16: {n16_act:.3f}, N10: {n10_act:.3f}): {item['text']}"
+        f"  - Index {idx.item()} (Cat: {item['category']}, N4: {n4_act:.3f}, N27: {n27_act:.3f}): {item['text']}"
     )
 
-# Query 2: External Crisis without Deep Personal Distress (High N10 > threshold, Low N16)
+# Query 2: Structured Thought during Chaos (High N13, High N27)
 print(
-    f"\nRetrieving top {TOP_K} memories for Refined External Crisis (N10 >= 0.5, penalized by N16)..."
+    f"\nRetrieving top {TOP_K} memories for High N13 & High N27 (Structured Thought in Chaos)..."
 )
-CRISIS_THRESHOLD = 0.5  # Define the threshold
-top_indices_crisis_refined, top_scores_crisis_refined = retrieve_external_crisis(
+top_indices_p13_p27, top_scores_p13_p27 = retrieve_memories_composite(
     memory_trace,
-    crisis_neuron=NEURON_10_INDEX,
-    distress_neuron=NEURON_16_INDEX,
-    threshold=CRISIS_THRESHOLD,
+    positive_neurons=[NEURON_13_INDEX, NEURON_27_INDEX],
+    negative_neurons=[],
     k=TOP_K,
 )
-
-if top_indices_crisis_refined.numel() > 0:
-    print(f"Retrieved indices: {top_indices_crisis_refined.tolist()}")
-    print(
-        "Associated composite scores (N10 - N16, for N10 >= threshold):",
-        [f"{v:.4f}" for v in top_scores_crisis_refined.tolist()],
-    )
-    print("Corresponding Narratives:")
-    for idx in top_indices_crisis_refined:
-        item = synthetic_data[idx.item()]
-        n16_act = memory_trace[idx.item(), NEURON_16_INDEX].item()
-        n10_act = memory_trace[idx.item(), NEURON_10_INDEX].item()
-        print(
-            f"  - Index {idx.item()} (Cat: {item['category']}, N16: {n16_act:.3f}, N10: {n10_act:.3f}): {item['text']}"
-        )
-else:
-    print("No memories met the refined external crisis criteria.")
-
-# Query 3: Routine-like (Low N10 and Low N16) - Maximize the NEGATIVE of their sum
-print(f"\nRetrieving top {TOP_K} memories for Low N10 & Low N16 (Routine Focus)...")
-# We want the MINIMUM sum of N10 and N16. TopK finds maximums.
-# So, we find the maximum of the NEGATIVE of their average activation.
-# Effectively, retrieve_memories_composite with only negative neurons maximizes the score = 0 - neg_penalty
-top_indices_routine, top_scores_routine = retrieve_memories_composite(
-    memory_trace,
-    positive_neurons=[],  # No positive contribution
-    negative_neurons=[NEURON_10_INDEX, NEURON_16_INDEX],
-    k=TOP_K,
-)
-# Note: The score here is -(Avg(N10, N16)), so higher score means lower activation
-print(f"Retrieved indices: {top_indices_routine.tolist()}")
+print(f"Retrieved indices: {top_indices_p13_p27.tolist()}")
 print(
-    "Associated composite scores (higher means lower N10/N16 activation):",
-    [f"{v:.4f}" for v in top_scores_routine.tolist()],
+    "Associated composite scores (Avg(N13, N27)):",
+    [f"{v:.4f}" for v in top_scores_p13_p27.tolist()],
 )
 print("Corresponding Narratives:")
-for idx in top_indices_routine:
+for idx in top_indices_p13_p27:
     item = synthetic_data[idx.item()]
-    n16_act = memory_trace[idx.item(), NEURON_16_INDEX].item()
-    n10_act = memory_trace[idx.item(), NEURON_10_INDEX].item()
+    n13_act = memory_trace[idx.item(), NEURON_13_INDEX].item()
+    n27_act = memory_trace[idx.item(), NEURON_27_INDEX].item()
     print(
-        f"  - Index {idx.item()} (Cat: {item['category']}, N16: {n16_act:.3f}, N10: {n10_act:.3f}): {item['text']}"
+        f"  - Index {idx.item()} (Cat: {item['category']}, N13: {n13_act:.3f}, N27: {n27_act:.3f}): {item['text']}"
     )
 
-# -------------------------------------\
+# Query 3: Non-Emotional Structure/Routine (High N13, Low N4, Low N27)
+print(
+    f"\nRetrieving top {TOP_K} memories for High N13 / Low N4 & N27 (Routine Structure Focus)..."
+)
+top_indices_p13_n4_n27, top_scores_p13_n4_n27 = retrieve_memories_composite(
+    memory_trace,
+    positive_neurons=[NEURON_13_INDEX],
+    negative_neurons=[NEURON_4_INDEX, NEURON_27_INDEX],
+    k=TOP_K,
+)
+print(f"Retrieved indices: {top_indices_p13_n4_n27.tolist()}")
+print(
+    "Associated composite scores (N13 - Avg(N4, N27)):",
+    [f"{v:.4f}" for v in top_scores_p13_n4_n27.tolist()],
+)
+print("Corresponding Narratives:")
+for idx in top_indices_p13_n4_n27:
+    item = synthetic_data[idx.item()]
+    n4_act = memory_trace[idx.item(), NEURON_4_INDEX].item()
+    n13_act = memory_trace[idx.item(), NEURON_13_INDEX].item()
+    n27_act = memory_trace[idx.item(), NEURON_27_INDEX].item()
+    print(
+        f"  - Index {idx.item()} (Cat: {item['category']}, N4: {n4_act:.3f}, N13: {n13_act:.3f}, N27: {n27_act:.3f}): {item['text']}"
+    )
+
+# (Removing old queries based on N10/N16)
+# print(
+#     f"\nRetrieving top {TOP_K} memories for High N16 / Low N10 (Personal Distress Focus)..."
+# )
+# ... (old code removed) ...
+# print(
+#     f"\nRetrieving top {TOP_K} memories for Refined External Crisis (N10 >= 0.5, penalized by N16)..."
+# )
+# ... (old code removed) ...
+# print(f"\nRetrieving top {TOP_K} memories for Low N10 & Low N16 (Routine Focus)...")
+# ... (old code removed) ...
+
+
+# -------------------------------------
 # 9. Further Analysis (Placeholder for original analysis plots if any)
-# -------------------------------------\
+# -------------------------------------
 print("\n--- Analysis/Retrieval Complete --- ")
 
 # --- Visualization Section ---
