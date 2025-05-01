@@ -46,7 +46,8 @@ COMPRESSED_SIZE = 30
 
 # --- Paths ---
 PRETRAINED_MODEL_PATH = "sae_model_beta0005.pth"  # From sine-wave training
-SYNTHETIC_DATA_PATH = "synthetic_narrative_data.json"  # Path to generated data
+# SYNTHETIC_DATA_PATH = "synthetic_narrative_data.json"  # OLD Path to generated data
+SYNTHETIC_DATA_PATH = "processed_batches/results_batch_68132475ee8481908e4db8b9c4605c0c.json"  # NEW Path to richer generated data
 FINETUNED_MODEL_SAVE_PATH = "sae_text_finetuned.pth"
 
 # --- Fine-tuning Hyperparameters ---
