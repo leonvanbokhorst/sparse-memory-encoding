@@ -5,6 +5,10 @@ import torch.nn.functional as F  # For cosine similarity
 import matplotlib.pyplot as plt
 import numpy as np
 
+seed = 42
+torch.manual_seed(seed)
+np.random.seed(seed)
+
 
 # -------------------------------------
 # 1. Model Definition (Same as before)

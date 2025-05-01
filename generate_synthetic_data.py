@@ -3,6 +3,7 @@ import json
 import os
 import time
 import tempfile  # To create temporary file for upload
+import random
 from tqdm import tqdm  # Keep for polling maybe
 
 # -------------------------------------
@@ -22,6 +23,20 @@ OUTPUT_FILENAME = "synthetic_narrative_data.json"
 MAX_TOKENS = 60
 TEMPERATURE = 0.7
 
+# --- Scenario Diversity ---  <-- ADD THIS SECTION
+SCENARIO_TYPES = [
+    "something someone says in a specific situation",
+    "a description of what someone sees",
+    "how someone physically or emotionally reacts to an event",
+    "a brief memory someone recalls",
+    "how someone wishes they could respond or act",
+    "a moment of self-reflection or internal thought",
+    "an expression of a need or want",
+    "a description of a physical or emotional feeling",
+    "a short plan or intention someone has",
+    "an observation about another person's behavior",
+]
+
 # --- Batch API Config ---
 BATCH_INPUT_FILENAME = "batch_input_requests.jsonl"
 BATCH_POLL_INTERVAL = 30  # seconds
@@ -35,13 +50,37 @@ def create_batch_input_file(filename):
     requests = []
     request_id_counter = 0
     for category in CATEGORIES:
+        # --- Create a balanced and shuffled list of scenario types for this category ---
+        num_scenario_types = len(SCENARIO_TYPES)
+        examples_per_type = EXAMPLES_PER_CATEGORY // num_scenario_types
+        # Ensure it divides evenly (add check later if needed, it does for 500/10)
+        category_scenario_assignments = []
+        for type_name in SCENARIO_TYPES:
+            category_scenario_assignments.extend([type_name] * examples_per_type)
+
+        # Add remaining examples if not perfectly divisible (not needed for 500/10)
+        remainder = EXAMPLES_PER_CATEGORY % num_scenario_types
+        if remainder > 0:
+            category_scenario_assignments.extend(SCENARIO_TYPES[:remainder])
+
+        random.shuffle(category_scenario_assignments)  # Shuffle the assignments
+        # --- End scenario type preparation ---
+
         for i in range(EXAMPLES_PER_CATEGORY):
             request_id_counter += 1
             custom_id = f"request_{category.lower().replace(' ', '_')}_{i+1}"
+
+            # Get the pre-assigned scenario type for this index
+            scenario_type = category_scenario_assignments[i]
+
+            # New prompt emphasizing uniqueness, category, and scenario type
             prompt = (
-                f"You are a narrative generator. Produce ONE short textual scenario "
+                f"You are a narrative generator. Please provide a **unique** short textual scenario "
                 f"(1-2 concise sentences) that clearly illustrates the category: '{category}'. "
-                f"Focus on clear examples. Do not add labels or extra formatting."
+                f"Specifically, the scenario should describe: '{scenario_type}'. "
+                f"Give a **distinct example**, different from common clichés. "
+                f"Scenario {i+1} for category '{category}', focusing on '{scenario_type}'. "
+                f"Do not add labels or extra formatting."
             )
 
             request_body = {
@@ -85,8 +124,11 @@ def upload_file(filename):
         print(f"File uploaded successfully. File ID: {batch_input_file.id}")
         # Clean up local file after upload
         try:
-            os.remove(filename)
-            print(f"Removed local input file: {filename}")
+            # os.remove(filename) # <-- Commented out to keep the input file
+            # print(f"Removed local input file: {filename}")
+            print(
+                f"Keeping local input file for inspection: {filename}"
+            )  # Added message
         except OSError as e:
             print(f"Warning: Could not remove local input file {filename}: {e}")
         return batch_input_file.id
@@ -224,7 +266,26 @@ def get_and_parse_results(batch_status):
                 print(f"Error parsing result item: {parse_e}")
 
         print(f"Successfully parsed {len(results_data)} results.")
-        return results_data
+
+        # --- Deduplication Step ---
+        print("--- Deduplicating Results ---")
+        unique_narratives = set()
+        deduplicated_data = []
+        duplicates_removed = 0
+        for item in results_data:
+            # Normalize text (lowercase, strip whitespace) for comparison
+            narrative_text = item.get("text", "").strip().lower()
+            if narrative_text and narrative_text not in unique_narratives:
+                unique_narratives.add(narrative_text)
+                deduplicated_data.append(item)
+            elif narrative_text:
+                duplicates_removed += 1
+
+        print(f"Removed {duplicates_removed} duplicate narratives.")
+        print(f"Final unique narratives: {len(deduplicated_data)}")
+        # --- End Deduplication ---
+
+        return deduplicated_data  # Return the deduplicated list
 
     except Exception as e:
         print(f"Error retrieving or parsing results: {e}")
